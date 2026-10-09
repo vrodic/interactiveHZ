@@ -29,7 +29,8 @@ body, html {
     align-items: center;
     justify-content: space-between;
     padding: 0 16px;
-    z-index: 2000;
+    z-index: 10000;
+    position: relative;
 }
 
 .logo-section {
@@ -57,6 +58,7 @@ body, html {
 .search-section {
     position: relative;
     width: 300px;
+    z-index: 10001;
 }
 
 .search-input {
@@ -84,9 +86,9 @@ body, html {
     border-radius: 8px;
     max-height: 280px;
     overflow-y: auto;
-    z-index: 9999;
+    z-index: 10002;
     display: none;
-    box-shadow: 0 8px 16px rgba(0,0,0,0.6);
+    box-shadow: 0 12px 24px rgba(0,0,0,0.8);
 }
 
 .search-item {
@@ -257,8 +259,8 @@ body, html {
 }
 
 .train-marker-container {
-    width: 44px;
-    height: 44px;
+    width: 50px;
+    height: 62px;
     cursor: pointer;
     background: transparent;
     border: none;
@@ -266,8 +268,17 @@ body, html {
 
 .train-marker-inner {
     position: relative;
-    width: 44px;
-    height: 44px;
+    width: 50px;
+    height: 62px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+}
+
+.train-svg-wrapper {
+    width: 36px;
+    height: 36px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -279,18 +290,18 @@ body, html {
 }
 
 .train-number-badge {
-    position: absolute;
-    bottom: -2px;
+    margin-top: 4px;
     background: #0f172a;
     color: #38bdf8;
     border: 1px solid #0284c7;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
-    padding: 1px 4px;
+    padding: 1px 5px;
     border-radius: 8px;
     white-space: nowrap;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.7);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.8);
     pointer-events: none;
+    z-index: 10;
 }
 
 .train-marker-container.delayed .train-number-badge {

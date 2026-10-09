@@ -327,38 +327,40 @@ function getTrainSVGHTML(trainNumber, isDelayed, bearing) {
     const darkColor = isDelayed ? '#991b1b' : '#1e3a8a';
     return `
         <div class="train-marker-inner">
-            <svg class="train-svg" style="transform: rotate(${Math.round(bearing)}deg);" width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <!-- Outer Glow Aura -->
-                <rect x="7" y="3" width="26" height="34" rx="6" fill="${color}" fill-opacity="0.2" />
+            <div class="train-svg-wrapper">
+                <svg class="train-svg" style="transform: rotate(${Math.round(bearing)}deg);" width="36" height="36" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <!-- Outer Glow Aura -->
+                    <rect x="7" y="3" width="26" height="34" rx="6" fill="${color}" fill-opacity="0.2" />
 
-                <!-- Main Rectangular Locomotive / Train Carriage Body (Pointing UP) -->
-                <rect x="10" y="5" width="20" height="30" rx="5" fill="${color}" stroke="#ffffff" stroke-width="2"/>
+                    <!-- Main Rectangular Locomotive / Train Carriage Body (Pointing UP) -->
+                    <rect x="10" y="5" width="20" height="30" rx="5" fill="${color}" stroke="#ffffff" stroke-width="2"/>
 
-                <!-- Front Aerodynamic Nose / Slanted Front Bumper -->
-                <path d="M11 9 C11 6.5, 14 5, 20 5 C26 5, 29 6.5, 29 9 L28 14 H12 Z" fill="${darkColor}" opacity="0.4"/>
+                    <!-- Front Aerodynamic Nose / Slanted Front Bumper -->
+                    <path d="M11 9 C11 6.5, 14 5, 20 5 C26 5, 29 6.5, 29 9 L28 14 H12 Z" fill="${darkColor}" opacity="0.4"/>
 
-                <!-- Front Windshield (Two Panels) -->
-                <rect x="12" y="10" width="7" height="4.5" rx="1" fill="#bae6fd" stroke="${darkColor}" stroke-width="0.7"/>
-                <rect x="21" y="10" width="7" height="4.5" rx="1" fill="#bae6fd" stroke="${darkColor}" stroke-width="0.7"/>
+                    <!-- Front Windshield (Two Panels) -->
+                    <rect x="12" y="10" width="7" height="4.5" rx="1" fill="#bae6fd" stroke="${darkColor}" stroke-width="0.7"/>
+                    <rect x="21" y="10" width="7" height="4.5" rx="1" fill="#bae6fd" stroke="${darkColor}" stroke-width="0.7"/>
 
-                <!-- Side Passenger Windows -->
-                <rect x="11.5" y="17" width="2" height="4" rx="0.5" fill="#e0f2fe"/>
-                <rect x="11.5" y="23" width="2" height="4" rx="0.5" fill="#e0f2fe"/>
-                <rect x="26.5" y="17" width="2" height="4" rx="0.5" fill="#e0f2fe"/>
-                <rect x="26.5" y="23" width="2" height="4" rx="0.5" fill="#e0f2fe"/>
+                    <!-- Side Passenger Windows -->
+                    <rect x="11.5" y="17" width="2" height="4" rx="0.5" fill="#e0f2fe"/>
+                    <rect x="11.5" y="23" width="2" height="4" rx="0.5" fill="#e0f2fe"/>
+                    <rect x="26.5" y="17" width="2" height="4" rx="0.5" fill="#e0f2fe"/>
+                    <rect x="26.5" y="23" width="2" height="4" rx="0.5" fill="#e0f2fe"/>
 
-                <!-- Roof Equipment / Air Conditioner Unit -->
-                <rect x="15" y="18" width="10" height="11" rx="2" fill="#ffffff" opacity="0.3"/>
-                <line x1="17" y1="20" x2="23" y2="20" stroke="#ffffff" stroke-width="1" opacity="0.8"/>
-                <line x1="17" y1="23" x2="23" y2="23" stroke="#ffffff" stroke-width="1" opacity="0.8"/>
-                <line x1="17" y1="26" x2="23" y2="26" stroke="#ffffff" stroke-width="1" opacity="0.8"/>
+                    <!-- Roof Equipment / Air Conditioner Unit -->
+                    <rect x="15" y="18" width="10" height="11" rx="2" fill="#ffffff" opacity="0.3"/>
+                    <line x1="17" y1="20" x2="23" y2="20" stroke="#ffffff" stroke-width="1" opacity="0.8"/>
+                    <line x1="17" y1="23" x2="23" y2="23" stroke="#ffffff" stroke-width="1" opacity="0.8"/>
+                    <line x1="17" y1="26" x2="23" y2="26" stroke="#ffffff" stroke-width="1" opacity="0.8"/>
 
-                <!-- Dual Front Headlights -->
-                <circle cx="13" cy="7" r="1.5" fill="#fef08a" stroke="#ffffff" stroke-width="0.5"/>
-                <circle cx="27" cy="7" r="1.5" fill="#fef08a" stroke="#ffffff" stroke-width="0.5"/>
-                <!-- Center High Beam -->
-                <circle cx="20" cy="6" r="1.2" fill="#ffffff"/>
-            </svg>
+                    <!-- Dual Front Headlights -->
+                    <circle cx="13" cy="7" r="1.5" fill="#fef08a" stroke="#ffffff" stroke-width="0.5"/>
+                    <circle cx="27" cy="7" r="1.5" fill="#fef08a" stroke="#ffffff" stroke-width="0.5"/>
+                    <!-- Center High Beam -->
+                    <circle cx="20" cy="6" r="1.2" fill="#ffffff"/>
+                </svg>
+            </div>
             <div class="train-number-badge">${trainNumber}</div>
         </div>
     `;
@@ -414,8 +416,8 @@ function updateTrainMarkersClientSide() {
             const icon = L.divIcon({
                 className: `train-marker-container ${isDelayed ? 'delayed' : ''}`,
                 html: getTrainSVGHTML(train.train_number, isDelayed, bearing),
-                iconSize: [44, 44],
-                iconAnchor: [22, 22]
+                iconSize: [50, 62],
+                iconAnchor: [25, 18]
             });
 
             const marker = L.marker(pos, { icon: icon }).addTo(map);
