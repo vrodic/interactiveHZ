@@ -611,6 +611,29 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 	if err := json.Unmarshal(body, &delayResp); err == nil && delayResp.Success {
 		s.delayCache.Store(trainID, delayResp)
 
+		nowSec := time.Now().Hour()*3600 + time.Now().Minute()*60 + time.Now().Second()
+
+		// Check if the train is active for today (supposed to be departed and not yet arrived)
+		var firstDepSec, lastArrSec int
+		var currentDelay int
+		_ = s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ?", trainID).Scan(&currentDelay)
+
+		errSchedule := s.db.QueryRow(`
+			SELECT MIN(st_first.departure_seconds), MAX(st_last.arrival_seconds)
+			FROM stop_times st_first
+			JOIN trips t ON st_first.trip_id = t.trip_id
+			JOIN stop_times st_last ON st_last.trip_id = t.trip_id
+			WHERE COALESCE(t.trip_short_name, t.trip_id) = ?
+		`, trainID).Scan(&firstDepSec, &lastArrSec)
+
+		isActiveTrain := true
+		if errSchedule == nil {
+			effectiveArrSec := lastArrSec + (currentDelay * 60)
+			if nowSec < firstDepSec || nowSec > effectiveArrSec {
+				isActiveTrain = false
+			}
+		}
+
 		delayMins := 0
 		if delayResp.Data.DelayMinutes != nil {
 			delayMins = *delayResp.Data.DelayMinutes
@@ -620,35 +643,38 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 			nextSt = *delayResp.Data.NextStation
 		}
 
-		todayDate := time.Now().Format("2006-01-02")
+		// Only persist/update delay stats if train is currently active for today
+		if isActiveTrain {
+			todayDate := time.Now().Format("2006-01-02")
 
-		_, _ = s.db.Exec(`
-			INSERT INTO train_delays (train_number, delay_minutes, position_status, last_station, next_station, updated_at)
-			VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-			ON CONFLICT(train_number) DO UPDATE SET
-				delay_minutes=excluded.delay_minutes,
-				position_status=excluded.position_status,
-				last_station=excluded.last_station,
-				next_station=excluded.next_station,
-				updated_at=CURRENT_TIMESTAMP
-		`, trainID, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
+			_, _ = s.db.Exec(`
+				INSERT INTO train_delays (train_number, delay_minutes, position_status, last_station, next_station, updated_at)
+				VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				ON CONFLICT(train_number) DO UPDATE SET
+					delay_minutes=excluded.delay_minutes,
+					position_status=excluded.position_status,
+					last_station=excluded.last_station,
+					next_station=excluded.next_station,
+					updated_at=CURRENT_TIMESTAMP
+			`, trainID, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
 
-		_, _ = s.db.Exec(`
-			INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		`, trainID, todayDate, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
+			_, _ = s.db.Exec(`
+				INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			`, trainID, todayDate, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
 
-		// Broadcast event via SSE broadcaster
-		eventJSON, _ := json.Marshal(map[string]interface{}{
-			"type":            "delay_update",
-			"train_number":    trainID,
-			"delay_minutes":   delayMins,
-			"position_status": delayResp.Data.PositionStatus,
-			"last_station":    delayResp.Data.LastStation,
-			"next_station":    nextSt,
-			"timestamp":       time.Now().Format("15:04:05"),
-		})
-		s.broadcaster.Broadcast(string(eventJSON))
+			// Broadcast event via SSE broadcaster
+			eventJSON, _ := json.Marshal(map[string]interface{}{
+				"type":            "delay_update",
+				"train_number":    trainID,
+				"delay_minutes":   delayMins,
+				"position_status": delayResp.Data.PositionStatus,
+				"last_station":    delayResp.Data.LastStation,
+				"next_station":    nextSt,
+				"timestamp":       time.Now().Format("15:04:05"),
+			})
+			s.broadcaster.Broadcast(string(eventJSON))
+		}
 
 		return &delayResp, nil
 	}
@@ -726,9 +752,10 @@ func (s *Server) StartBackgroundDelayWorker() {
 				FROM stop_times st1
 				JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
 				JOIN trips t ON st1.trip_id = t.trip_id
-				WHERE st1.departure_seconds <= ? AND st2.arrival_seconds >= ?
+				LEFT JOIN train_delays td ON td.train_number = COALESCE(t.trip_short_name, t.trip_id)
+				WHERE st1.departure_seconds <= ? AND (st2.arrival_seconds + COALESCE(td.delay_minutes, 0) * 60) >= ?
 			`
-			rows, err := s.db.Query(query, nowSec+1800, nowSec-10800)
+			rows, err := s.db.Query(query, nowSec, nowSec)
 			if err != nil {
 				continue
 			}
