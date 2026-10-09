@@ -47,6 +47,8 @@ document.addEventListener('DOMContentLoaded', () => {
     startUpdateLoop();
 });
 
+let hideSpeedMarkers = false;
+
 function initMap() {
     // Zoomed between Zagreb Zapadni kolodvor [45.8117, 15.9525] and Prečec [45.8078, 16.3262]
     map = L.map('map').fitBounds([
@@ -54,10 +56,43 @@ function initMap() {
         [45.8078, 16.3262]  // Prečec
     ], { padding: [40, 40] });
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    // Define Leaflet basemap tile layers
+    const darkMatter = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
         maxZoom: 19,
-        attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map);
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    });
+
+    const osmStandard = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    });
+
+    const lightVoyager = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    });
+
+    const openTopo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+        maxZoom: 17,
+        attribution: 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, SRTM | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a>'
+    });
+
+    // Default tile layer
+    darkMatter.addTo(map);
+
+    const baseMaps = {
+        "CartoDB Dark": darkMatter,
+        "OSM Standard": osmStandard,
+        "CartoDB Light": lightVoyager,
+        "OpenTopoMap": openTopo
+    };
+
+    const overlayMaps = {
+        "Track Segments": segmentsLayerGroup,
+        "Segment Speed Badges": segmentBadgesLayerGroup
+    };
+
+    L.control.layers(baseMaps, overlayMaps, { position: 'topright' }).addTo(map);
 
     segmentsLayerGroup.addTo(map);
     segmentBadgesLayerGroup.addTo(map);
@@ -70,7 +105,7 @@ function updateSegmentVisibility() {
     if (zoom < 8) {
         if (map.hasLayer(segmentsLayerGroup)) map.removeLayer(segmentsLayerGroup);
         if (map.hasLayer(segmentBadgesLayerGroup)) map.removeLayer(segmentBadgesLayerGroup);
-    } else if (zoom < 10) {
+    } else if (zoom < 10 || hideSpeedMarkers) {
         if (!map.hasLayer(segmentsLayerGroup)) map.addLayer(segmentsLayerGroup);
         if (map.hasLayer(segmentBadgesLayerGroup)) map.removeLayer(segmentBadgesLayerGroup);
     } else {
@@ -438,6 +473,22 @@ function initNavHandlers() {
     document.getElementById('close-delays-stream-modal').addEventListener('click', () => {
         delaysStreamModal.style.display = 'none';
     });
+
+    const toggleSpeedsBtn = document.getElementById('toggle-speeds-btn');
+    const toggleSpeedsLabel = document.getElementById('toggle-speeds-label');
+    if (toggleSpeedsBtn) {
+        toggleSpeedsBtn.addEventListener('click', () => {
+            hideSpeedMarkers = !hideSpeedMarkers;
+            if (hideSpeedMarkers) {
+                toggleSpeedsLabel.textContent = 'Show Speeds';
+                toggleSpeedsBtn.classList.add('active');
+            } else {
+                toggleSpeedsLabel.textContent = 'Hide Speeds';
+                toggleSpeedsBtn.classList.remove('active');
+            }
+            updateSegmentVisibility();
+        });
+    }
 
     document.getElementById('nav-routes').addEventListener('click', () => {
         tripPlannerDrawer.style.display = 'flex';
