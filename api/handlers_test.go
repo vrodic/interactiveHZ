@@ -34,7 +34,10 @@ func setupTestDB(t *testing.T) *Server {
 		t.Fatalf("Failed to seed database: %v", err)
 	}
 
-	return NewServer(database)
+	_ = db.PopulateRouteSegments(database)
+	srv := NewServer(database)
+	srv.InvalidateSegmentsCache()
+	return srv
 }
 
 func TestGetStations(t *testing.T) {

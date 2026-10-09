@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"hz-train-map/db"
 )
 
 type Broadcaster struct {
@@ -63,10 +65,12 @@ type Server struct {
 }
 
 func NewServer(db *sql.DB) *Server {
-	return &Server{
+	srv := &Server{
 		db:          db,
 		broadcaster: NewBroadcaster(),
 	}
+	go srv.GetCachedSegments()
+	return srv
 }
 
 func (s *Server) SetOSMGraph(graph *OSMGraph) {
@@ -557,21 +561,23 @@ func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
 }
 
 func (s *Server) ComputeSegments() []SegmentSpeed {
+	var count int
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM route_segments").Scan(&count)
+	if count == 0 {
+		var stCount int
+		_ = s.db.QueryRow("SELECT COUNT(*) FROM stop_times").Scan(&stCount)
+		if stCount > 0 {
+			_ = db.PopulateRouteSegments(s.db)
+		}
+	}
+
 	query := `
-		SELECT st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon,
-		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon,
-		       COUNT(DISTINCT COALESCE(t.trip_short_name, t.trip_id)) as train_count,
-		       AVG(
-		           CASE WHEN (st2.arrival_seconds - st1.departure_seconds) > 0 THEN
-		               CAST(st2.arrival_seconds - st1.departure_seconds AS REAL) / 60.0
-		           END
-		       ) as avg_duration_mins
-		FROM stop_times st1
-		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
-		JOIN stations s1 ON st1.stop_id = s1.stop_id
-		JOIN stations s2 ON st2.stop_id = s2.stop_id
-		JOIN trips t ON st1.trip_id = t.trip_id
-		GROUP BY st1.stop_id, st2.stop_id
+		SELECT rs.from_stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon,
+		       rs.to_stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon,
+		       rs.train_count, rs.avg_duration_mins
+		FROM route_segments rs
+		JOIN stations s1 ON rs.from_stop_id = s1.stop_id
+		JOIN stations s2 ON rs.to_stop_id = s2.stop_id
 	`
 
 	rows, err := s.db.Query(query)
@@ -589,7 +595,7 @@ func (s *Server) ComputeSegments() []SegmentSpeed {
 			toID, toName     string
 			toLat, toLon     float64
 			trainCount       int
-			avgDurationMins  sql.NullFloat64
+			avgDurationMins  float64
 		)
 
 		if err := rows.Scan(&fromID, &fromName, &fromLat, &fromLon, &toID, &toName, &toLat, &toLon, &trainCount, &avgDurationMins); err != nil {
@@ -602,8 +608,8 @@ func (s *Server) ComputeSegments() []SegmentSpeed {
 		}
 
 		avgSpeedKmh := 0.0
-		if avgDurationMins.Valid && avgDurationMins.Float64 > 0 {
-			avgSpeedKmh = distKm / (avgDurationMins.Float64 / 60.0)
+		if avgDurationMins > 0 {
+			avgSpeedKmh = distKm / (avgDurationMins / 60.0)
 		}
 
 		segID := fromID + "->" + toID

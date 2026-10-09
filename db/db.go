@@ -160,10 +160,28 @@ func InitDB(dbPath string) (*sql.DB, error) {
 
 	CREATE INDEX IF NOT EXISTS idx_hist_delays_date ON historical_train_delays(delay_date);
 	CREATE INDEX IF NOT EXISTS idx_hist_delays_train_date ON historical_train_delays(train_number, delay_date);
+
+	CREATE TABLE IF NOT EXISTS route_segments (
+		from_stop_id TEXT NOT NULL,
+		to_stop_id TEXT NOT NULL,
+		train_count INTEGER NOT NULL,
+		avg_duration_mins REAL NOT NULL,
+		PRIMARY KEY (from_stop_id, to_stop_id)
+	);
 	`
 
 	if _, err := database.Exec(schema); err != nil {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	var segCount int
+	_ = database.QueryRow("SELECT COUNT(*) FROM route_segments").Scan(&segCount)
+	if segCount == 0 {
+		var stCount int
+		_ = database.QueryRow("SELECT COUNT(*) FROM stop_times").Scan(&stCount)
+		if stCount > 0 {
+			_ = PopulateRouteSegments(database)
+		}
 	}
 
 	var geomExists int
@@ -176,4 +194,22 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	}
 
 	return database, nil
+}
+
+func PopulateRouteSegments(database *sql.DB) error {
+	query := `
+		INSERT INTO route_segments (from_stop_id, to_stop_id, train_count, avg_duration_mins)
+		SELECT st1.stop_id, st2.stop_id,
+		       COUNT(DISTINCT COALESCE(t.trip_short_name, t.trip_id)) as train_count,
+		       COALESCE(AVG(CASE WHEN (st2.arrival_seconds - st1.departure_seconds) > 0 THEN CAST(st2.arrival_seconds - st1.departure_seconds AS REAL) / 60.0 END), 0) as avg_duration_mins
+		FROM stop_times st1
+		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
+		JOIN trips t ON st1.trip_id = t.trip_id
+		GROUP BY st1.stop_id, st2.stop_id
+		ON CONFLICT(from_stop_id, to_stop_id) DO UPDATE SET
+			train_count=excluded.train_count,
+			avg_duration_mins=excluded.avg_duration_mins;
+	`
+	_, err := database.Exec(query)
+	return err
 }

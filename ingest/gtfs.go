@@ -14,11 +14,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"hz-train-map/db"
 )
 
 const DefaultGTFSURL = "https://www.hzpp.hr/GTFS_files.zip"
 
-func IngestGTFS(db *sql.DB, gtfsURL string, localCacheDir string) error {
+func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
 	log.Println("Starting GTFS ingestion...")
 
 	var zipData []byte
@@ -34,7 +36,7 @@ func IngestGTFS(db *sql.DB, gtfsURL string, localCacheDir string) error {
 		if fi, err := os.Stat(cachedPath); err == nil {
 			if time.Since(fi.ModTime()) < 24*time.Hour {
 				var count int
-				_ = db.QueryRow("SELECT COUNT(*) FROM stations").Scan(&count)
+				_ = sqlDB.QueryRow("SELECT COUNT(*) FROM stations").Scan(&count)
 				if count > 0 {
 					log.Printf("GTFS cache file %s is less than 24h old and DB is populated (%d stations). Skipping ingestion.", cachedPath, count)
 					return nil
@@ -75,7 +77,7 @@ func IngestGTFS(db *sql.DB, gtfsURL string, localCacheDir string) error {
 		fileMap[f.Name] = f
 	}
 
-	tx, err := db.Begin()
+	tx, err := sqlDB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -124,7 +126,9 @@ func IngestGTFS(db *sql.DB, gtfsURL string, localCacheDir string) error {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	log.Println("GTFS ingestion completed successfully.")
+	log.Println("GTFS ingestion completed successfully. Pre-aggregating route_segments summary table...")
+	_ = db.PopulateRouteSegments(sqlDB)
+
 	return nil
 }
 
