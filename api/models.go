@@ -1,5 +1,10 @@
 package api
 
+type LatLon struct {
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
+}
+
 type Station struct {
 	StopID   string  `json:"stop_id"`
 	StopName string  `json:"stop_name"`
@@ -35,6 +40,7 @@ type ActiveTrain struct {
 	PositionStatus   string  `json:"position_status,omitempty"`
 	ScheduledDepSec  int     `json:"scheduled_dep_sec"`
 	ScheduledArrSec  int     `json:"scheduled_arr_sec"`
+	Path             []LatLon `json:"path,omitempty"`
 }
 
 type TrainSegmentSpeed struct {

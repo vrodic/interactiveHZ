@@ -10,14 +10,16 @@ let currentTimeSec = getCurrentSecondsOfDay();
 let isRealtime = true;
 let isPlaying = false;
 let playbackSpeed = 1;
+let lastFetchTime = 0;
+let lastAnimTime = performance.now();
 
 function getCurrentSecondsOfDay() {
     const d = new Date();
-    return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+    return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds() + d.getMilliseconds() / 1000;
 }
 
 function formatSecondsToTime(totalSec) {
-    totalSec = ((totalSec % 86400) + 86400) % 86400;
+    totalSec = Math.floor(((totalSec % 86400) + 86400) % 86400);
     const h = Math.floor(totalSec / 3600);
     const m = Math.floor((totalSec % 3600) / 60);
     const s = Math.floor(totalSec % 60);
@@ -138,20 +140,133 @@ function initControls() {
     });
 }
 
+function haversineKm(lat1, lon1, lat2, lon2) {
+    const radAvgLat = ((lat1 + lat2) / 2.0) * (Math.PI / 180.0);
+    const cosLat = Math.cos(radAvgLat);
+    const dx = (lon2 - lon1) * 40000.0 * cosLat / 360.0;
+    const dy = (lat2 - lat1) * 40000.0 / 360.0;
+    return Math.sqrt(dx * dx + dy * dy);
+}
+
+function getPointOnPath(path, progress) {
+    if (!path || path.length === 0) return null;
+    if (path.length === 1 || progress <= 0) return [path[0].lat, path[0].lon];
+    if (progress >= 1) return [path[path.length - 1].lat, path[path.length - 1].lon];
+
+    let totalDist = 0;
+    const segs = [];
+    for (let i = 0; i < path.length - 1; i++) {
+        const d = haversineKm(path[i].lat, path[i].lon, path[i + 1].lat, path[i + 1].lon) || 0.0001;
+        segs.push({ p1: path[i], p2: path[i + 1], len: d });
+        totalDist += d;
+    }
+
+    if (totalDist === 0) return [path[0].lat, path[0].lon];
+
+    const targetDist = progress * totalDist;
+    let accum = 0;
+
+    for (const seg of segs) {
+        if (accum + seg.len >= targetDist) {
+            const segProgress = (targetDist - accum) / seg.len;
+            const lat = seg.p1.lat + (seg.p2.lat - seg.p1.lat) * segProgress;
+            const lon = seg.p1.lon + (seg.p2.lon - seg.p1.lon) * segProgress;
+            return [lat, lon];
+        }
+        accum += seg.len;
+    }
+
+    return [path[path.length - 1].lat, path[path.length - 1].lon];
+}
+
 function startUpdateLoop() {
-    setInterval(() => {
+    function animate(now) {
+        const dt = (now - lastAnimTime) / 1000;
+        lastAnimTime = now;
+
         if (isRealtime) {
             currentTimeSec = getCurrentSecondsOfDay();
-            document.getElementById('time-slider').value = currentTimeSec;
+            document.getElementById('time-slider').value = Math.floor(currentTimeSec);
             document.getElementById('time-display').textContent = formatSecondsToTime(currentTimeSec);
-            fetchActiveTrains();
+
+            if (now - lastFetchTime > 10000) { // Fetch active trains from server every 10s in realtime
+                lastFetchTime = now;
+                fetchActiveTrains();
+            }
         } else if (isPlaying) {
-            currentTimeSec = (currentTimeSec + playbackSpeed * 2) % 86400;
-            document.getElementById('time-slider').value = currentTimeSec;
+            currentTimeSec = (currentTimeSec + dt * playbackSpeed * 2) % 86400;
+            document.getElementById('time-slider').value = Math.floor(currentTimeSec);
             document.getElementById('time-display').textContent = formatSecondsToTime(currentTimeSec);
-            fetchActiveTrains();
+
+            if (now - lastFetchTime > 5000) { // Fetch every 5s when playing back
+                lastFetchTime = now;
+                fetchActiveTrains();
+            }
         }
-    }, 1000);
+
+        updateTrainMarkersClientSide();
+        requestAnimationFrame(animate);
+    }
+
+    lastAnimTime = performance.now();
+    requestAnimationFrame(animate);
+}
+
+function updateTrainMarkersClientSide() {
+    const currentTrainIds = new Set();
+
+    activeTrainsData.forEach(train => {
+        currentTrainIds.add(train.trip_id);
+
+        const effTime = currentTimeSec - (train.delay_minutes || 0) * 60;
+        const depSec = train.scheduled_dep_sec;
+        const arrSec = train.scheduled_arr_sec;
+        const duration = arrSec - depSec;
+
+        let progress = train.progress;
+        if (duration > 0) {
+            progress = (effTime - depSec) / duration;
+            if (progress < 0) progress = 0;
+            if (progress > 1) progress = 1;
+        }
+
+        let pos = [train.lat, train.lon];
+        if (train.path && train.path.length > 0) {
+            const calculatedPos = getPointOnPath(train.path, progress);
+            if (calculatedPos) pos = calculatedPos;
+        }
+
+        if (trainMarkersMap[train.trip_id]) {
+            trainMarkersMap[train.trip_id].setLatLng(pos);
+            if (train.delay_minutes > 0) {
+                trainMarkersMap[train.trip_id].getElement()?.classList.add('delayed');
+            } else {
+                trainMarkersMap[train.trip_id].getElement()?.classList.remove('delayed');
+            }
+        } else {
+            const icon = L.divIcon({
+                className: `train-marker ${train.delay_minutes > 0 ? 'delayed' : ''}`,
+                html: '🚆',
+                iconSize: [32, 32],
+                iconAnchor: [16, 16]
+            });
+
+            const marker = L.marker(pos, { icon: icon }).addTo(map);
+
+            marker.on('click', () => {
+                openTrainDetails(train);
+            });
+
+            trainMarkersMap[train.trip_id] = marker;
+        }
+    });
+
+    Object.keys(trainMarkersMap).forEach(tripId => {
+        if (!currentTrainIds.has(tripId)) {
+            map.removeLayer(trainMarkersMap[tripId]);
+            delete trainMarkersMap[tripId];
+        }
+    });
 }
 
 async function loadStations() {
@@ -327,42 +442,7 @@ async function fetchActiveTrains() {
 }
 
 function updateTrainMarkers() {
-    const currentTrainIds = new Set();
-
-    activeTrainsData.forEach(train => {
-        currentTrainIds.add(train.trip_id);
-
-        if (trainMarkersMap[train.trip_id]) {
-            trainMarkersMap[train.trip_id].setLatLng([train.lat, train.lon]);
-            if (train.delay_minutes > 0) {
-                trainMarkersMap[train.trip_id].getElement()?.classList.add('delayed');
-            } else {
-                trainMarkersMap[train.trip_id].getElement()?.classList.remove('delayed');
-            }
-        } else {
-            const icon = L.divIcon({
-                className: `train-marker ${train.delay_minutes > 0 ? 'delayed' : ''}`,
-                html: '🚆',
-                iconSize: [32, 32],
-                iconAnchor: [16, 16]
-            });
-
-            const marker = L.marker([train.lat, train.lon], { icon: icon }).addTo(map);
-
-            marker.on('click', () => {
-                openTrainDetails(train);
-            });
-
-            trainMarkersMap[train.trip_id] = marker;
-        }
-    });
-
-    Object.keys(trainMarkersMap).forEach(tripId => {
-        if (!currentTrainIds.has(tripId)) {
-            map.removeLayer(trainMarkersMap[tripId]);
-            delete trainMarkersMap[tripId];
-        }
-    });
+    updateTrainMarkersClientSide();
 }
 
 function openTrainDetails(train) {

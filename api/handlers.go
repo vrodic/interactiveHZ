@@ -16,12 +16,116 @@ import (
 type Server struct {
 	db         *sql.DB
 	delayCache sync.Map
+	routeCache sync.Map
 }
 
 func NewServer(db *sql.DB) *Server {
 	return &Server{
 		db: db,
 	}
+}
+
+func (s *Server) getRouteWaypoints(fromID, toID string, s1Lat, s1Lon, s2Lat, s2Lon float64) []LatLon {
+	key := fromID + "->" + toID
+	if val, ok := s.routeCache.Load(key); ok {
+		return val.([]LatLon)
+	}
+
+	querySelect := `
+		SELECT st1.trip_id, st1.stop_sequence, st2.stop_sequence, (st2.stop_sequence - st1.stop_sequence) as diff
+		FROM stop_times st1
+		JOIN stop_times st2 ON st1.trip_id = st2.trip_id
+		WHERE st1.stop_id = ? AND st2.stop_id = ? AND st2.stop_sequence > st1.stop_sequence
+		ORDER BY diff DESC
+		LIMIT 1
+	`
+	var tripID string
+	var seq1, seq2, diff int
+	err := s.db.QueryRow(querySelect, fromID, toID).Scan(&tripID, &seq1, &seq2, &diff)
+	if err == nil && diff > 1 {
+		queryPath := `
+			SELECT s.stop_lat, s.stop_lon
+			FROM stop_times st
+			JOIN stations s ON st.stop_id = s.stop_id
+			WHERE st.trip_id = ? AND st.stop_sequence >= ? AND st.stop_sequence <= ?
+			ORDER BY st.stop_sequence ASC
+		`
+		rows, err := s.db.Query(queryPath, tripID, seq1, seq2)
+		if err == nil {
+			var path []LatLon
+			for rows.Next() {
+				var lat, lon float64
+				if err := rows.Scan(&lat, &lon); err == nil {
+					path = append(path, LatLon{Lat: lat, Lon: lon})
+				}
+			}
+			rows.Close()
+			if len(path) > 1 {
+				s.routeCache.Store(key, path)
+				return path
+			}
+		}
+	}
+
+	path := []LatLon{{Lat: s1Lat, Lon: s1Lon}, {Lat: s2Lat, Lon: s2Lon}}
+	s.routeCache.Store(key, path)
+	return path
+}
+
+func interpolateAlongPath(path []LatLon, progress float64) (float64, float64) {
+	if len(path) == 0 {
+		return 0, 0
+	}
+	if len(path) == 1 || progress <= 0 {
+		return path[0].Lat, path[0].Lon
+	}
+	if progress >= 1 {
+		return path[len(path)-1].Lat, path[len(path)-1].Lon
+	}
+
+	// Calculate total length and segment lengths along path
+	type segLen struct {
+		length float64
+		p1, p2 LatLon
+	}
+	var segs []segLen
+	totalLen := 0.0
+
+	for i := 0; i < len(path)-1; i++ {
+		p1 := path[i]
+		p2 := path[i+1]
+		d := haversineKm(p1.Lat, p1.Lon, p2.Lat, p2.Lon)
+		if d < 1e-6 {
+			d = 1e-6
+		}
+		segs = append(segs, segLen{length: d, p1: p1, p2: p2})
+		totalLen += d
+	}
+
+	if totalLen <= 0 {
+		return path[0].Lat, path[0].Lon
+	}
+
+	targetDist := progress * totalLen
+	accum := 0.0
+
+	for _, seg := range segs {
+		if accum+seg.length >= targetDist {
+			segProgress := (targetDist - accum) / seg.length
+			if segProgress < 0 {
+				segProgress = 0
+			}
+			if segProgress > 1 {
+				segProgress = 1
+			}
+			lat := seg.p1.Lat + (seg.p2.Lat-seg.p1.Lat)*segProgress
+			lon := seg.p1.Lon + (seg.p2.Lon-seg.p1.Lon)*segProgress
+			return lat, lon
+		}
+		accum += seg.length
+	}
+
+	return path[len(path)-1].Lat, path[len(path)-1].Lon
 }
 
 func (s *Server) GetStations(w http.ResponseWriter, r *http.Request) {
@@ -59,11 +163,12 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := `
-		SELECT st.trip_id, COALESCE(t.trip_short_name, t.trip_id), COALESCE(t.trip_headsign, ''),
-		       st.arrival_time, st.departure_time, st.stop_sequence
+		SELECT MIN(st.trip_id), COALESCE(t.trip_short_name, t.trip_id) AS train_num, COALESCE(t.trip_headsign, ''),
+		       st.arrival_time, st.departure_time, MIN(st.stop_sequence)
 		FROM stop_times st
 		JOIN trips t ON st.trip_id = t.trip_id
 		WHERE st.stop_id = ?
+		GROUP BY train_num, st.departure_time, st.arrival_time
 		ORDER BY st.departure_seconds ASC
 		LIMIT 100
 	`
@@ -196,8 +301,8 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 				status = "at_station"
 			}
 
-			curLat := s1Lat + (s2Lat-s1Lat)*progress
-			curLon := s1Lon + (s2Lon-s1Lon)*progress
+			pathWaypoints := s.getRouteWaypoints(s1ID, s2ID, s1Lat, s1Lon, s2Lat, s2Lon)
+			curLat, curLon := interpolateAlongPath(pathWaypoints, progress)
 
 			activeTrainsMap[tripID] = ActiveTrain{
 				TripID:           tripID,
@@ -216,6 +321,7 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 				DelayMinutes:     delayMinutes,
 				ScheduledDepSec:  s1DepSec,
 				ScheduledArrSec:  s2ArrSec,
+				Path:             pathWaypoints,
 			}
 		}
 	}
