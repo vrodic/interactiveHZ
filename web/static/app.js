@@ -1,8 +1,10 @@
 let map;
 let stationsData = [];
 let activeTrainsData = [];
+let segmentsData = [];
 let stationMarkersMap = {};
 let trainMarkersMap = {};
+let segmentLinesMap = {};
 
 let currentTimeSec = getCurrentSecondsOfDay();
 let isRealtime = true;
@@ -26,6 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initMap();
     initControls();
     loadStations();
+    loadSegments();
     startUpdateLoop();
 });
 
@@ -162,6 +165,16 @@ async function loadStations() {
     }
 }
 
+async function loadSegments() {
+    try {
+        const resp = await fetch('/api/segments');
+        segmentsData = await resp.json();
+        renderSegments();
+    } catch (e) {
+        console.error('Failed to load segments:', e);
+    }
+}
+
 function renderStations() {
     stationsData.forEach(st => {
         const icon = L.divIcon({
@@ -178,6 +191,86 @@ function renderStations() {
 
         stationMarkersMap[st.stop_id] = marker;
     });
+}
+
+function renderSegments() {
+    segmentsData.forEach(seg => {
+        const key = `${seg.from_stop_id}-${seg.to_stop_id}`;
+        const line = L.polyline([[seg.from_lat, seg.from_lon], [seg.to_lat, seg.to_lon]], {
+            color: '#3b82f6',
+            weight: 3,
+            opacity: 0.6
+        }).addTo(map);
+
+        const midLat = (seg.from_lat + seg.to_lat) / 2;
+        const midLon = (seg.from_lon + seg.to_lon) / 2;
+
+        const speedLabelIcon = L.divIcon({
+            className: 'segment-speed-badge',
+            html: `<span>⚡ ${Math.round(seg.avg_speed_kmh)} km/h</span>`,
+            iconSize: [60, 20],
+            iconAnchor: [30, 10]
+        });
+
+        const labelMarker = L.marker([midLat, midLon], { icon: speedLabelIcon }).addTo(map);
+
+        const clickHandler = () => {
+            openSegmentDetails(seg);
+        };
+
+        line.on('click', clickHandler);
+        labelMarker.on('click', clickHandler);
+
+        segmentLinesMap[key] = { line, labelMarker };
+    });
+}
+
+function openSegmentDetails(seg) {
+    let trainRowsHTML = '';
+    if (seg.trains && seg.trains.length > 0) {
+        seg.trains.forEach(tr => {
+            const depTime = formatSecondsToTime(tr.scheduled_dep_sec);
+            const arrTime = formatSecondsToTime(tr.scheduled_arr_sec);
+            trainRowsHTML += `
+                <tr style="border-bottom: 1px solid #2a313d;">
+                    <td style="padding: 6px 4px;"><strong>Train ${tr.train_number}</strong></td>
+                    <td style="padding: 6px 4px;">${depTime} - ${arrTime}</td>
+                    <td style="padding: 6px 4px; color: #10b981; font-weight: bold;">${Math.round(tr.speed_kmh)} km/h</td>
+                </tr>
+            `;
+        });
+    } else {
+        trainRowsHTML = `<tr><td colspan="3" style="padding: 8px; text-align: center; color: #a0aec0;">No train data for segment.</td></tr>`;
+    }
+
+    const popupHTML = `
+        <div style="max-height: 280px; overflow-y: auto; width: 300px;">
+            <h3 style="margin-bottom: 4px; color: #3b82f6;">📍 ${seg.from_stop_name} ➔ ${seg.to_stop_name}</h3>
+            <div style="font-size: 12px; color: #a0aec0; margin-bottom: 10px;">
+                Distance: <strong>${seg.distance_km.toFixed(1)} km</strong> | Avg Speed: <strong style="color: #10b981;">${Math.round(seg.avg_speed_kmh)} km/h</strong> (${seg.train_count} trains)
+            </div>
+            <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                <thead>
+                    <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
+                        <th style="padding: 4px;">Train</th>
+                        <th style="padding: 4px;">Dep - Arr</th>
+                        <th style="padding: 4px;">Speed</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${trainRowsHTML}
+                </tbody>
+            </table>
+        </div>
+    `;
+
+    const midLat = (seg.from_lat + seg.to_lat) / 2;
+    const midLon = (seg.from_lon + seg.to_lon) / 2;
+
+    L.popup()
+        .setLatLng([midLat, midLon])
+        .setContent(popupHTML)
+        .openOn(map);
 }
 
 async function openStationTimetable(station) {
@@ -201,7 +294,8 @@ async function openStationTimetable(station) {
             timetableHTML += `<tr><td colspan="3" style="padding: 8px; text-align: center; color: #a0aec0;">No scheduled trains found.</td></tr>`;
         } else {
             entries.forEach(e => {
-                const delayStr = (e.delay_minutes && e.delay_minutes > 0) ? `<span style="color: #ef4444;">+${e.delay_minutes}m</span>` : `<span style="color: #10b981;">On Time</span>`;
+                const delayVal = typeof e.delay_minutes === 'number' ? e.delay_minutes : 0;
+                const delayStr = delayVal > 0 ? `<span style="color: #ef4444;">+${delayVal}m</span>` : `<span style="color: #10b981;">On Time</span>`;
                 timetableHTML += `<tr style="border-bottom: 1px solid #2a313d;">
                     <td style="padding: 6px 4px;"><strong>${e.train_number}</strong></td>
                     <td style="padding: 6px 4px;">${e.arrival_time} / ${e.departure_time}</td>
@@ -240,6 +334,11 @@ function updateTrainMarkers() {
 
         if (trainMarkersMap[train.trip_id]) {
             trainMarkersMap[train.trip_id].setLatLng([train.lat, train.lon]);
+            if (train.delay_minutes > 0) {
+                trainMarkersMap[train.trip_id].getElement()?.classList.add('delayed');
+            } else {
+                trainMarkersMap[train.trip_id].getElement()?.classList.remove('delayed');
+            }
         } else {
             const icon = L.divIcon({
                 className: `train-marker ${train.delay_minutes > 0 ? 'delayed' : ''}`,
@@ -274,10 +373,21 @@ function openTrainDetails(train) {
         ? `<span class="badge badge-delay">+${train.delay_minutes} min delay</span>`
         : `<span class="badge badge-on-time">On Time</span>`;
 
+    const originStation = train.first_station_name || 'Origin Station';
+    const destStation = train.last_station_name || 'Destination Station';
+
     content.innerHTML = `
         <div class="panel-header">
             <div class="panel-title">🚆 Train ${train.train_number}</div>
             ${delayBadge}
+        </div>
+        <div class="detail-row">
+            <div class="detail-label">First Station (Origin)</div>
+            <div class="detail-value">🚩 ${originStation}</div>
+        </div>
+        <div class="detail-row">
+            <div class="detail-label">Last Station (Destination)</div>
+            <div class="detail-value">🏁 ${destStation}</div>
         </div>
         <div class="detail-row">
             <div class="detail-label">Route / Headsign</div>
@@ -292,10 +402,10 @@ function openTrainDetails(train) {
             <div class="detail-value">${Math.round(train.progress * 100)}%</div>
         </div>
         <div class="detail-row">
-            <div class="detail-label">Coordinates</div>
-            <div class="detail-value">${train.lat.toFixed(4)}, ${train.lon.toFixed(4)}</div>
+            <div class="detail-label">Delay Status</div>
+            <div class="detail-value">${train.delay_minutes > 0 ? `<span style="color:#ef4444; font-weight:bold;">Running with +${train.delay_minutes} min delay (position auto-adjusted on map)</span>` : '<span style="color:#10b981; font-weight:bold;">On Time</span>'}</div>
         </div>
-        <button class="refresh-delay-btn" id="check-delay-btn">📡 Check Live Delay Status</button>
+        <button class="refresh-delay-btn" id="check-delay-btn">📡 Refresh Live Delay Status</button>
         <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;"></div>
     `;
 
@@ -309,15 +419,20 @@ function openTrainDetails(train) {
             const data = await resp.json();
             if (data.success && data.data) {
                 const live = data.data;
-                const liveDelay = live.delayMinutes ? `+${live.delayMinutes} min` : 'On Time / No Delay';
+                const liveDelayMins = live.delayMinutes || 0;
+                const liveDelayStr = liveDelayMins > 0 ? `+${liveDelayMins} min` : 'On Time / No Delay';
+
                 resultDiv.innerHTML = `
                     <div style="background: #1e242e; padding: 10px; border-radius: 6px; border: 1px solid #3a4250;">
                         <div><strong>Status:</strong> ${live.positionStatus || 'Unknown'}</div>
-                        <div><strong>Delay:</strong> ${liveDelay}</div>
+                        <div><strong>Live Delay:</strong> <span style="color:${liveDelayMins > 0 ? '#ef4444' : '#10b981'}">${liveDelayStr}</span></div>
                         <div><strong>Last Station:</strong> ${live.lastStation || 'N/A'}</div>
                         <div><strong>Next Station:</strong> ${live.nextStation || 'N/A'}</div>
                     </div>
                 `;
+
+                // Immediately trigger active trains fetch to adjust map positions with new delay data
+                fetchActiveTrains();
             } else {
                 resultDiv.innerHTML = '<span style="color: #ef4444;">No live status available for this train.</span>';
             }

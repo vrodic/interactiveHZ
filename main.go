@@ -54,6 +54,7 @@ func main() {
 	mux.HandleFunc("/api/stations", server.GetStations)
 	mux.HandleFunc("/api/stations/", server.GetStationTimetable)
 	mux.HandleFunc("/api/active-trains", server.GetActiveTrains)
+	mux.HandleFunc("/api/segments", server.GetSegments)
 	mux.HandleFunc("/api/train-delay", server.FetchTrainDelay)
 
 	staticSubFS, err := fs.Sub(staticEmbedFS, "web/static")

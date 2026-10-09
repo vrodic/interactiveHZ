@@ -134,12 +134,19 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT t.trip_id, COALESCE(t.trip_short_name, t.trip_id), COALESCE(t.trip_headsign, ''),
 		       st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon, st1.departure_seconds,
-		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon, st2.arrival_seconds
+		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon, st2.arrival_seconds,
+		       COALESCE(first_s.stop_name, ''), COALESCE(last_s.stop_name, '')
 		FROM stop_times st1
 		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
 		JOIN stations s1 ON st1.stop_id = s1.stop_id
 		JOIN stations s2 ON st2.stop_id = s2.stop_id
 		JOIN trips t ON st1.trip_id = t.trip_id
+		LEFT JOIN stop_times st_first ON st_first.trip_id = t.trip_id AND st_first.stop_sequence = 1
+		LEFT JOIN stations first_s ON st_first.stop_id = first_s.stop_id
+		LEFT JOIN stop_times st_last ON st_last.trip_id = t.trip_id AND st_last.stop_sequence = (
+			SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id
+		)
+		LEFT JOIN stations last_s ON st_last.stop_id = last_s.stop_id
 		WHERE st1.departure_seconds <= ? AND st2.arrival_seconds >= ?
 	`
 
@@ -161,9 +168,10 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 			s2ID, s2Name                            string
 			s2Lat, s2Lon                            float64
 			s2ArrSec                                int
+			firstStName, lastStName                 string
 		)
 
-		if err := rows.Scan(&tripID, &trainNum, &headsign, &s1ID, &s1Name, &s1Lat, &s1Lon, &s1DepSec, &s2ID, &s2Name, &s2Lat, &s2Lon, &s2ArrSec); err != nil {
+		if err := rows.Scan(&tripID, &trainNum, &headsign, &s1ID, &s1Name, &s1Lat, &s1Lon, &s1DepSec, &s2ID, &s2Name, &s2Lat, &s2Lon, &s2ArrSec, &firstStName, &lastStName); err != nil {
 			continue
 		}
 
@@ -192,20 +200,22 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 			curLon := s1Lon + (s2Lon-s1Lon)*progress
 
 			activeTrainsMap[tripID] = ActiveTrain{
-				TripID:          tripID,
-				TrainNumber:     trainNum,
-				Headsign:        headsign,
-				CurrentLat:      curLat,
-				CurrentLon:      curLon,
-				PrevStationID:   s1ID,
-				PrevStationName: s1Name,
-				NextStationID:   s2ID,
-				NextStationName: s2Name,
-				Progress:        progress,
-				Status:          status,
-				DelayMinutes:    delayMinutes,
-				ScheduledDepSec: s1DepSec,
-				ScheduledArrSec: s2ArrSec,
+				TripID:           tripID,
+				TrainNumber:      trainNum,
+				Headsign:         headsign,
+				CurrentLat:       curLat,
+				CurrentLon:       curLon,
+				FirstStationName: firstStName,
+				LastStationName:  lastStName,
+				PrevStationID:    s1ID,
+				PrevStationName:  s1Name,
+				NextStationID:    s2ID,
+				NextStationName:  s2Name,
+				Progress:         progress,
+				Status:           status,
+				DelayMinutes:     delayMinutes,
+				ScheduledDepSec:  s1DepSec,
+				ScheduledArrSec:  s2ArrSec,
 			}
 		}
 	}
@@ -217,6 +227,123 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(activeTrains)
+}
+
+// Helper to calculate distance in km between two lat/lon points
+func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
+	radAvgLat := ((lat1 + lat2) / 2.0) * (3.141592653589793 / 180.0)
+	cosLat := 1.0 - (radAvgLat*radAvgLat)/2.0 + (radAvgLat*radAvgLat*radAvgLat*radAvgLat)/24.0
+	dx := (lon2 - lon1) * 40000.0 * cosLat / 360.0
+	dy := (lat2 - lat1) * 40000.0 / 360.0
+	val := dx*dx + dy*dy
+	if val <= 0 {
+		return 0
+	}
+	x := val
+	for i := 0; i < 10; i++ {
+		x = (x + val/x) / 2.0
+	}
+	return x
+}
+
+func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
+	query := `
+		SELECT st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon,
+		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon,
+		       COALESCE(t.trip_short_name, t.trip_id), t.trip_id, COALESCE(t.trip_headsign, ''),
+		       st1.departure_seconds, st2.arrival_seconds
+		FROM stop_times st1
+		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
+		JOIN stations s1 ON st1.stop_id = s1.stop_id
+		JOIN stations s2 ON st2.stop_id = s2.stop_id
+		JOIN trips t ON st1.trip_id = t.trip_id
+	`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type segmentKey struct {
+		fromID string
+		toID   string
+	}
+
+	segmentMap := make(map[segmentKey]*SegmentSpeed)
+
+	for rows.Next() {
+		var (
+			fromID, fromName                string
+			fromLat, fromLon                float64
+			toID, toName                    string
+			toLat, toLon                    float64
+			trainNum, tripID, headsign      string
+			depSec, arrSec                  int
+		)
+
+		if err := rows.Scan(&fromID, &fromName, &fromLat, &fromLon, &toID, &toName, &toLat, &toLon, &trainNum, &tripID, &headsign, &depSec, &arrSec); err != nil {
+			continue
+		}
+
+		durationSec := arrSec - depSec
+		if durationSec <= 0 {
+			continue
+		}
+
+		distKm := haversineKm(fromLat, fromLon, toLat, toLon)
+		if distKm < 0.1 {
+			continue
+		}
+
+		durationMins := float64(durationSec) / 60.0
+		speedKmh := distKm / (durationMins / 60.0)
+
+		key := segmentKey{fromID: fromID, toID: toID}
+		seg, exists := segmentMap[key]
+		if !exists {
+			seg = &SegmentSpeed{
+				FromStopID:   fromID,
+				FromStopName: fromName,
+				FromLat:      fromLat,
+				FromLon:      fromLon,
+				ToStopID:     toID,
+				ToStopName:   toName,
+				ToLat:        toLat,
+				ToLon:        toLon,
+				DistanceKm:   distKm,
+				Trains:       make([]TrainSegmentSpeed, 0),
+			}
+			segmentMap[key] = seg
+		}
+
+		seg.Trains = append(seg.Trains, TrainSegmentSpeed{
+			TrainNumber:     trainNum,
+			TripID:          tripID,
+			Headsign:        headsign,
+			ScheduledDepSec: depSec,
+			ScheduledArrSec: arrSec,
+			DurationMinutes: durationMins,
+			SpeedKmh:        speedKmh,
+		})
+	}
+
+	segments := make([]SegmentSpeed, 0, len(segmentMap))
+	for _, seg := range segmentMap {
+		seg.TrainCount = len(seg.Trains)
+		totalSpeed := 0.0
+		for _, tr := range seg.Trains {
+			totalSpeed += tr.SpeedKmh
+		}
+		if seg.TrainCount > 0 {
+			seg.AvgSpeedKmh = totalSpeed / float64(seg.TrainCount)
+		}
+		segments = append(segments, *seg)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(segments)
 }
 
 func (s *Server) FetchTrainDelay(w http.ResponseWriter, r *http.Request) {
