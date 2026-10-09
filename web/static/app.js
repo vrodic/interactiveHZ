@@ -5,6 +5,7 @@ let segmentsData = [];
 let stationMarkersMap = {};
 let trainMarkersMap = {};
 let segmentLinesMap = {};
+let segmentPathsMap = {};
 let segmentsLayerGroup = L.layerGroup();
 let segmentBadgesLayerGroup = L.layerGroup();
 let currentOpenedTripId = null;
@@ -387,8 +388,18 @@ function updateTrainMarkersClientSide() {
         let pos = [train.lat, train.lon];
         let bearing = 0;
 
-        if (train.path && train.path.length > 0) {
-            const pb = getPointAndBearingOnPath(train.path, progress);
+        let trainPath = train.path;
+        if ((!trainPath || trainPath.length === 0) && train.segment_id && segmentPathsMap[train.segment_id]) {
+            trainPath = segmentPathsMap[train.segment_id];
+        } else if ((!trainPath || trainPath.length === 0) && train.prev_station_id && train.next_station_id) {
+            const segKey = `${train.prev_station_id}->${train.next_station_id}`;
+            if (segmentPathsMap[segKey]) {
+                trainPath = segmentPathsMap[segKey];
+            }
+        }
+
+        if (trainPath && trainPath.length > 0) {
+            const pb = getPointAndBearingOnPath(trainPath, progress);
             if (pb.pos) {
                 pos = pb.pos;
                 bearing = pb.bearing;
@@ -950,8 +961,19 @@ function renderSegments() {
     segmentBadgesLayerGroup.clearLayers();
 
     segmentsData.forEach(seg => {
-        const key = `${seg.from_stop_id}-${seg.to_stop_id}`;
-        const line = L.polyline([[seg.from_lat, seg.from_lon], [seg.to_lat, seg.to_lon]], {
+        const key = seg.id || `${seg.from_stop_id}->${seg.to_stop_id}`;
+        let lineCoords = [[seg.from_lat, seg.from_lon], [seg.to_lat, seg.to_lon]];
+        if (seg.path && seg.path.length > 0) {
+            lineCoords = seg.path.map(pt => [pt.lat, pt.lon]);
+            segmentPathsMap[key] = seg.path;
+            segmentPathsMap[`${seg.from_stop_id}->${seg.to_stop_id}`] = seg.path;
+        } else {
+            const fallbackPath = [{ lat: seg.from_lat, lon: seg.from_lon }, { lat: seg.to_lat, lon: seg.to_lon }];
+            segmentPathsMap[key] = fallbackPath;
+            segmentPathsMap[`${seg.from_stop_id}->${seg.to_stop_id}`] = fallbackPath;
+        }
+
+        const line = L.polyline(lineCoords, {
             color: '#3b82f6',
             weight: 3,
             opacity: 0.6

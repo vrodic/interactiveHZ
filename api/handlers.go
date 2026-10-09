@@ -445,6 +445,7 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 					PrevStationName: s1Name,
 					NextStationID:   s2ID,
 					NextStationName: s2Name,
+					SegmentID:       s1ID + "->" + s2ID,
 					Progress:        progress,
 					Status:          status,
 					DelayMinutes:    delayMinutes,
@@ -619,7 +620,10 @@ func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
 		key := segmentKey{fromID: fromID, toID: toID}
 		seg, exists := segmentMap[key]
 		if !exists {
+			segID := fromID + "->" + toID
+			segPath := s.getRouteWaypoints(fromID, toID, fromLat, fromLon, toLat, toLon)
 			seg = &SegmentSpeed{
+				ID:           segID,
 				FromStopID:   fromID,
 				FromStopName: fromName,
 				FromLat:      fromLat,
@@ -629,15 +633,16 @@ func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
 				ToLat:        toLat,
 				ToLon:        toLon,
 				DistanceKm:   distKm,
+				Path:         segPath,
 				Trains:       make([]TrainSegmentSpeed, 0),
 			}
 			segmentMap[key] = seg
 		}
 
-		// Deduplicate train entries for the segment by train number and schedule
+		// Deduplicate train entries for the segment by train number
 		isDup := false
 		for _, tr := range seg.Trains {
-			if tr.TrainNumber == trainNum && tr.ScheduledDepSec == depSec && tr.ScheduledArrSec == arrSec {
+			if tr.TrainNumber == trainNum {
 				isDup = true
 				break
 			}
