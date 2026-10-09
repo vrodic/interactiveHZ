@@ -24,20 +24,37 @@ func IngestGTFS(db *sql.DB, gtfsURL string, localCacheDir string) error {
 	var zipData []byte
 	var err error
 
-	if gtfsURL != "" {
-		zipData, err = downloadGTFS(gtfsURL)
-		if err != nil {
-			log.Printf("Failed to download GTFS from %s: %v. Checking local cache...", gtfsURL, err)
-		} else {
-			if localCacheDir != "" {
-				_ = os.MkdirAll(localCacheDir, 0755)
-				_ = os.WriteFile(filepath.Join(localCacheDir, "GTFS_files.zip"), zipData, 0644)
+	cachedPath := ""
+	if localCacheDir != "" {
+		cachedPath = filepath.Join(localCacheDir, "GTFS_files.zip")
+	}
+
+	useCache := false
+	if cachedPath != "" {
+		if fi, err := os.Stat(cachedPath); err == nil {
+			if time.Since(fi.ModTime()) < 24*time.Hour {
+				var count int
+				_ = db.QueryRow("SELECT COUNT(*) FROM stations").Scan(&count)
+				if count > 0 {
+					log.Printf("GTFS cache file %s is less than 24h old and DB is populated (%d stations). Skipping ingestion.", cachedPath, count)
+					return nil
+				}
 			}
 		}
 	}
 
-	if len(zipData) == 0 && localCacheDir != "" {
-		cachedPath := filepath.Join(localCacheDir, "GTFS_files.zip")
+	if !useCache && gtfsURL != "" {
+		log.Printf("Downloading fresh GTFS data from %s...", gtfsURL)
+		zipData, err = downloadGTFS(gtfsURL)
+		if err != nil {
+			log.Printf("Failed to download GTFS from %s: %v. Checking local cache...", gtfsURL, err)
+		} else if localCacheDir != "" {
+			_ = os.MkdirAll(localCacheDir, 0755)
+			_ = os.WriteFile(cachedPath, zipData, 0644)
+		}
+	}
+
+	if len(zipData) == 0 && cachedPath != "" {
 		if data, err := os.ReadFile(cachedPath); err == nil {
 			log.Printf("Loaded GTFS data from local cache: %s", cachedPath)
 			zipData = data

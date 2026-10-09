@@ -76,12 +76,20 @@ function initControls() {
     timeSlider.value = currentTimeSec;
     timeDisplay.textContent = formatSecondsToTime(currentTimeSec);
 
+    let sliderDebounceTimer = null;
+
     timeSlider.addEventListener('input', (e) => {
         isRealtime = false;
         realtimeBtn.classList.remove('active');
         currentTimeSec = parseInt(e.target.value, 10);
         timeDisplay.textContent = formatSecondsToTime(currentTimeSec);
-        fetchActiveTrains();
+
+        if (sliderDebounceTimer) {
+            clearTimeout(sliderDebounceTimer);
+        }
+        sliderDebounceTimer = setTimeout(() => {
+            fetchActiveTrains();
+        }, 150);
     });
 
     playBtn.addEventListener('click', () => {

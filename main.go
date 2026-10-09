@@ -2,11 +2,14 @@ package main
 
 import (
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"hz-train-map/api"
@@ -68,8 +71,39 @@ func main() {
 		port = "8080"
 	}
 
+	serverURL := fmt.Sprintf("http://localhost:%s", port)
 	log.Printf("HŽ Interactive Train Map server listening on :%s", port)
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		openBrowser(serverURL)
+	}()
+
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("Server stopped: %v", err)
+	}
+}
+
+func openBrowser(url string) {
+	if os.Getenv("NO_BROWSER") != "" {
+		return
+	}
+
+	var err error
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		err = fmt.Errorf("unsupported platform")
+	}
+
+	if err != nil {
+		log.Printf("Note: Could not open browser automatically (%v). You can access the map at %s", err, url)
+	} else {
+		log.Printf("Opened %s in default browser", url)
 	}
 }
