@@ -49,6 +49,7 @@ func main() {
 			log.Printf("OSM railway graph built with %d track segments.", len(osmWays))
 		} else {
 			log.Printf("OSM railway ingestion warning: %v", err)
+			go server.GetCachedSegments()
 		}
 
 		ticker := time.NewTicker(24 * time.Hour)

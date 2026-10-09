@@ -71,7 +71,9 @@ func NewServer(db *sql.DB) *Server {
 
 func (s *Server) SetOSMGraph(graph *OSMGraph) {
 	s.osmGraph = graph
+	s.routeCache = sync.Map{}
 	s.InvalidateSegmentsCache()
+	go s.GetCachedSegments()
 }
 
 func (s *Server) GetCachedSegments() []SegmentSpeed {
@@ -112,42 +114,7 @@ func (s *Server) getRouteWaypoints(fromID, toID string, s1Lat, s1Lon, s2Lat, s2L
 		}
 	}
 
-	querySelect := `
-		SELECT st1.trip_id, st1.stop_sequence, st2.stop_sequence, (st2.stop_sequence - st1.stop_sequence) as diff
-		FROM stop_times st1
-		JOIN stop_times st2 ON st1.trip_id = st2.trip_id
-		WHERE st1.stop_id = ? AND st2.stop_id = ? AND st2.stop_sequence > st1.stop_sequence
-		ORDER BY diff DESC
-		LIMIT 1
-	`
-	var tripID string
-	var seq1, seq2, diff int
-	err := s.db.QueryRow(querySelect, fromID, toID).Scan(&tripID, &seq1, &seq2, &diff)
-	if err == nil && diff > 1 {
-		queryPath := `
-			SELECT s.stop_lat, s.stop_lon
-			FROM stop_times st
-			JOIN stations s ON st.stop_id = s.stop_id
-			WHERE st.trip_id = ? AND st.stop_sequence >= ? AND st.stop_sequence <= ?
-			ORDER BY st.stop_sequence ASC
-		`
-		rows, err := s.db.Query(queryPath, tripID, seq1, seq2)
-		if err == nil {
-			var path []LatLon
-			for rows.Next() {
-				var lat, lon float64
-				if err := rows.Scan(&lat, &lon); err == nil {
-					path = append(path, LatLon{Lat: lat, Lon: lon})
-				}
-			}
-			rows.Close()
-			if len(path) > 1 {
-				s.routeCache.Store(key, path)
-				return path
-			}
-		}
-	}
-
+	// Fast straight-line waypoint fallback for adjacent station segments
 	path := []LatLon{{Lat: s1Lat, Lon: s1Lon}, {Lat: s2Lat, Lon: s2Lon}}
 	s.routeCache.Store(key, path)
 	return path
