@@ -589,14 +589,16 @@ func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, error) {
-	// Check if existing record in train_delays indicates the train has already arrived
+	todayStr := time.Now().Format("2006-01-02")
+
+	// Check if existing record in train_delays indicates the train has already arrived for TODAY
 	var currentPosStatus string
 	var currentDelay int
 	var lastSt, nextSt string
-	_ = s.db.QueryRow("SELECT position_status, delay_minutes, last_station, next_station FROM train_delays WHERE train_number = ?", trainID).Scan(&currentPosStatus, &currentDelay, &lastSt, &nextSt)
+	var updatedAtStr string
+	errDB := s.db.QueryRow("SELECT position_status, delay_minutes, last_station, next_station, DATE(updated_at) FROM train_delays WHERE train_number = ?", trainID).Scan(&currentPosStatus, &currentDelay, &lastSt, &nextSt, &updatedAtStr)
 
-	lowPos := strings.ToLower(currentPosStatus)
-	if strings.Contains(lowPos, "stig") || strings.Contains(lowPos, "arriv") || strings.Contains(lowPos, "odred") {
+	if errDB == nil && strings.EqualFold(strings.TrimSpace(currentPosStatus), "arrived") && updatedAtStr == todayStr {
 		// Train has already arrived for today's trip! Do not query hzpp.app
 		if cached, ok := s.delayCache.Load(trainID); ok {
 			c := cached.(DelayAPIResponse)
@@ -771,6 +773,7 @@ func (s *Server) StartBackgroundDelayWorker() {
 		for range ticker.C {
 			nowSec := time.Now().Hour()*3600 + time.Now().Minute()*60 + time.Now().Second()
 
+			todayStr := time.Now().Format("2006-01-02")
 			query := `
 				SELECT DISTINCT COALESCE(t.trip_short_name, t.trip_id)
 				FROM stop_times st1
@@ -781,14 +784,11 @@ func (s *Server) StartBackgroundDelayWorker() {
 				  AND (st2.arrival_seconds + COALESCE(td.delay_minutes, 0) * 60) >= ?
 				  AND (
 				    td.position_status IS NULL
-				    OR (
-				      LOWER(td.position_status) NOT LIKE '%stig%'
-				      AND LOWER(td.position_status) NOT LIKE '%arriv%'
-				      AND LOWER(td.position_status) NOT LIKE '%odred%'
-				    )
+				    OR LOWER(td.position_status) != 'arrived'
+				    OR DATE(td.updated_at) != ?
 				  )
 			`
-			rows, err := s.db.Query(query, nowSec, nowSec)
+			rows, err := s.db.Query(query, nowSec, nowSec, todayStr)
 			if err != nil {
 				continue
 			}
