@@ -121,7 +121,9 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	CREATE INDEX IF NOT EXISTS idx_stop_times_stop_id ON stop_times(stop_id);
 	CREATE INDEX IF NOT EXISTS idx_stop_times_trip_seq ON stop_times(trip_id, stop_sequence);
 	CREATE INDEX IF NOT EXISTS idx_stop_times_dep_arr ON stop_times(departure_seconds, arrival_seconds);
+	CREATE INDEX IF NOT EXISTS idx_stop_times_dep_arr_trip ON stop_times(departure_seconds, arrival_seconds, trip_id);
 	CREATE INDEX IF NOT EXISTS idx_trips_short_name ON trips(trip_short_name);
+	CREATE INDEX IF NOT EXISTS idx_trips_service_id ON trips(service_id);
 
 	CREATE TABLE IF NOT EXISTS calendar (
 		service_id TEXT PRIMARY KEY,

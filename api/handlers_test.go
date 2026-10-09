@@ -197,3 +197,15 @@ func TestGetDashboardStats(t *testing.T) {
 		t.Errorf("Expected 1 active train, got %d", stats.ActiveTrainCount)
 	}
 }
+
+func BenchmarkGetActiveTrains(b *testing.B) {
+	t := &testing.T{}
+	srv := setupTestDB(t)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest("GET", "/api/active-trains?time=11:00:00", nil)
+		w := httptest.NewRecorder()
+		srv.GetActiveTrains(w, req)
+	}
+}
