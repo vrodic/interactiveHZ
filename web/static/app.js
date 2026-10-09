@@ -839,8 +839,8 @@ function renderSegments() {
         const speedLabelIcon = L.divIcon({
             className: 'segment-speed-badge',
             html: `<span>⚡ ${Math.round(seg.avg_speed_kmh)} km/h</span>`,
-            iconSize: [60, 20],
-            iconAnchor: [30, 10]
+            iconSize: [80, 22],
+            iconAnchor: [40, 11]
         });
 
         const labelMarker = L.marker([midLat, midLon], { icon: speedLabelIcon });

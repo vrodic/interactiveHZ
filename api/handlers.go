@@ -652,14 +652,6 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 			WHERE COALESCE(t.trip_short_name, t.trip_id) = ?
 		`, trainID).Scan(&firstDepSec, &lastArrSec)
 
-		isActiveTrain := true
-		if errSchedule == nil {
-			effectiveArrSec := lastArrSec + (currentDelay * 60)
-			if nowSec < firstDepSec || nowSec > effectiveArrSec {
-				isActiveTrain = false
-			}
-		}
-
 		delayMins := 0
 		if delayResp.Data.DelayMinutes != nil {
 			delayMins = *delayResp.Data.DelayMinutes
@@ -667,6 +659,14 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 		nextSt := ""
 		if delayResp.Data.NextStation != nil {
 			nextSt = *delayResp.Data.NextStation
+		}
+
+		isActiveTrain := true
+		if errSchedule == nil {
+			effectiveArrSec := lastArrSec + (delayMins * 60)
+			if (nowSec < firstDepSec || nowSec > effectiveArrSec+7200) && !strings.EqualFold(strings.TrimSpace(delayResp.Data.PositionStatus), "arrived") {
+				isActiveTrain = false
+			}
 		}
 
 		// Only persist/update delay stats if train is currently active for today
