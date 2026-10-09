@@ -23,7 +23,13 @@ func initDriver() {
 				entryPoints := []string{"sqlite3_modspatialite_init", "sqlite3_spatialite_init", ""}
 				extPaths := []string{
 					"mod_spatialite",
+					"mod_spatialite.dylib",
+					"/opt/homebrew/lib/mod_spatialite.dylib",
+					"/opt/homebrew/lib/mod_spatialite",
+					"/usr/local/lib/mod_spatialite.dylib",
+					"/usr/local/lib/mod_spatialite",
 					"/usr/lib/x86_64-linux-gnu/mod_spatialite",
+					"/usr/lib/x86_64-linux-gnu/mod_spatialite.so",
 				}
 
 				var lastErr error
