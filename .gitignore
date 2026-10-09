@@ -1,0 +1,12 @@
+# Binaries and build artifacts
+server
+
+# Database and runtime data files
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Logs and GTFS downloads
+*.log
+*.zip

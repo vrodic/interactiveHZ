@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HŽ Interactive Train Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div id="app-container">
+        <header id="header">
+            <div class="logo-section">
+                <span class="logo-badge">HŽ PP</span>
+                <span class="title">Interactive Train Map</span>
+            </div>
+            <div class="search-section">
+                <input type="text" id="search-input" class="search-input" placeholder="Search station or train number...">
+                <div id="search-results" class="search-results"></div>
+            </div>
+        </header>
+
+        <div id="map"></div>
+
+        <div id="time-controls">
+            <button id="realtime-btn" class="time-btn active">🔴 Realtime</button>
+            <button id="play-btn" class="time-btn">▶ Play</button>
+            <span id="time-display" class="time-display">12:00:00</span>
+            <input type="range" id="time-slider" class="time-slider" min="0" max="86399" value="43200">
+        </div>
+
+        <div id="side-panel">
+            <div class="panel-header">
+                <span class="panel-title">Details</span>
+                <button id="close-panel" class="close-btn">&times;</button>
+            </div>
+            <div id="panel-content"></div>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
