@@ -685,6 +685,7 @@ async function findRoutePlans() {
                 : `<span style="color: #10b981;">On Time</span>`;
 
             const isNext = r.is_nearest_future;
+            const rowClass = isNext ? 'route-plan-row next-departure-row' : 'route-plan-row';
             const rowStyle = isNext
                 ? 'background: rgba(0, 102, 204, 0.25); border-left: 4px solid #00e5ff; border-bottom: 1px solid #2a313d;'
                 : 'border-bottom: 1px solid #2a313d;';
@@ -695,9 +696,9 @@ async function findRoutePlans() {
             const arrTimeHM = stripSeconds(r.arrival_time);
 
             rowsHTML += `
-                <tr style="${rowStyle} cursor: pointer;" class="route-plan-row" data-depsec="${r.departure_seconds}">
+                <tr style="${rowStyle}" class="${rowClass}">
                     <td style="padding: 10px;">🕒 ${depTimeHM} ➔ ${arrTimeHM} <span style="color: #a0aec0; font-size: 11px;">(${r.duration_minutes} min)</span></td>
-                    <td style="padding: 10px;"><strong>Train ${r.train_number}</strong>${badgeStr}</td>
+                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${r.train_number}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">Train ${r.train_number}</a>${badgeStr}</td>
                     <td style="padding: 10px;">🚩 ${r.origin_station_name}</td>
                     <td style="padding: 10px;">🏁 ${r.destination_station_name}</td>
                     <td style="padding: 10px;">${delayStr}</td>
@@ -706,44 +707,50 @@ async function findRoutePlans() {
         });
 
         resultsContainer.innerHTML = `
-            <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                <thead>
-                    <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
-                        <th style="padding: 8px;">Departure ➔ Arrival</th>
-                        <th style="padding: 8px;">Train</th>
-                        <th style="padding: 8px;">Origin</th>
-                        <th style="padding: 8px;">Destination</th>
-                        <th style="padding: 8px;">Status</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${rowsHTML}
-                </tbody>
-            </table>
+            <div style="max-height: 280px; overflow-y: auto;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
+                            <th style="padding: 8px;">Departure ➔ Arrival</th>
+                            <th style="padding: 8px;">Train</th>
+                            <th style="padding: 8px;">Origin</th>
+                            <th style="padding: 8px;">Destination</th>
+                            <th style="padding: 8px;">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rowsHTML}
+                    </tbody>
+                </table>
+            </div>
         `;
 
-        // Automatically focus time slider to the nearest future departure time if present
-        const nearestRoute = routes.find(r => r.is_nearest_future);
-        if (nearestRoute) {
-            currentTimeSec = nearestRoute.departure_seconds;
-            isRealtime = false;
-            document.getElementById('realtime-btn').classList.remove('active');
-            document.getElementById('time-slider').value = currentTimeSec;
-            document.getElementById('time-display').textContent = formatSecondsToTime(currentTimeSec);
-            fetchActiveTrains();
+        // Scroll to next departure row if available
+        const nextRow = resultsContainer.querySelector('.next-departure-row');
+        if (nextRow) {
+            nextRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
 
-        // Allow clicking any route row to scrub timeline to that train's departure time
-        resultsContainer.querySelectorAll('.route-plan-row').forEach(row => {
-            row.addEventListener('click', () => {
-                const depSec = parseInt(row.getAttribute('data-depsec'), 10);
-                if (!isNaN(depSec)) {
-                    currentTimeSec = depSec;
-                    isRealtime = false;
-                    document.getElementById('realtime-btn').classList.remove('active');
-                    document.getElementById('time-slider').value = currentTimeSec;
-                    document.getElementById('time-display').textContent = formatSecondsToTime(currentTimeSec);
-                    fetchActiveTrains();
+        // Attach click listener to train links to focus active train on map
+        resultsContainer.querySelectorAll('.train-link').forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                const trainNum = link.getAttribute('data-train');
+                const activeTr = activeTrainsData.find(t => t.train_number === trainNum);
+                if (activeTr) {
+                    map.setView([activeTr.lat, activeTr.lon], 11);
+                    openTrainDetails(activeTr);
+                } else {
+                    updateTrainDetailsPanel({
+                        train_number: trainNum,
+                        headsign: 'Scheduled Train',
+                        first_station_name: 'Scheduled Route',
+                        last_station_name: 'Scheduled Route',
+                        prev_station_name: 'Scheduled',
+                        next_station_name: 'Scheduled',
+                        progress: 0,
+                        delay_minutes: 0
+                    }, true);
                 }
             });
         });
@@ -910,7 +917,7 @@ async function openStationTimetable(station) {
             <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
                 <thead>
                     <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
-                        <th style="padding: 4px;">Arr / Dep</th>
+                        <th style="padding: 4px;">Departure</th>
                         <th style="padding: 4px;">Train</th>
                         <th style="padding: 4px;">Destination</th>
                         <th style="padding: 4px;">Status</th>
@@ -925,10 +932,9 @@ async function openStationTimetable(station) {
                 const delayVal = typeof e.delay_minutes === 'number' ? e.delay_minutes : 0;
                 const delayStr = delayVal > 0 ? `<span style="color: #ef4444;">+${delayVal}m</span>` : `<span style="color: #10b981;">On Time</span>`;
                 const dest = e.destination_station_name || e.headsign || 'N/A';
-                const arrHM = stripSeconds(e.arrival_time);
                 const depHM = stripSeconds(e.departure_time);
                 timetableHTML += `<tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="timetable-row" data-train="${e.train_number}">
-                    <td style="padding: 6px 4px;">🕒 ${arrHM} / ${depHM}</td>
+                    <td style="padding: 6px 4px;">🕒 ${depHM}</td>
                     <td style="padding: 6px 4px;"><strong>Train ${e.train_number}</strong></td>
                     <td style="padding: 6px 4px; color: #e2e8f0; font-weight: 500;">🏁 ${dest}</td>
                     <td style="padding: 6px 4px;">${delayStr}</td>
@@ -938,10 +944,37 @@ async function openStationTimetable(station) {
 
         timetableHTML += `</tbody></table></div>`;
 
-        L.popup()
+        const popup = L.popup()
             .setLatLng([station.lat, station.lon])
             .setContent(timetableHTML)
             .openOn(map);
+
+        setTimeout(() => {
+            const popupNode = popup.getElement();
+            if (popupNode) {
+                popupNode.querySelectorAll('.timetable-row').forEach(row => {
+                    row.addEventListener('click', () => {
+                        const trNum = row.getAttribute('data-train');
+                        const activeTr = activeTrainsData.find(t => t.train_number === trNum);
+                        if (activeTr) {
+                            map.setView([activeTr.lat, activeTr.lon], 11);
+                            openTrainDetails(activeTr);
+                        } else {
+                            updateTrainDetailsPanel({
+                                train_number: trNum,
+                                headsign: 'Scheduled Train',
+                                first_station_name: 'Scheduled Route',
+                                last_station_name: 'Scheduled Route',
+                                prev_station_name: 'Scheduled',
+                                next_station_name: 'Scheduled',
+                                progress: 0,
+                                delay_minutes: 0
+                            }, true);
+                        }
+                    });
+                });
+            }
+        }, 50);
 
     } catch (err) {
         console.error('Failed to load station timetable:', err);
