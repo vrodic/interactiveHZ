@@ -110,14 +110,17 @@
                 <button class="close-btn" id="close-trip-planner-drawer">&times;</button>
             </div>
             <div class="drawer-body">
-                <div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;">
-                    <div style="flex: 1; min-width: 200px;">
+                <div style="display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; align-items: center;">
+                    <div style="flex: 1; min-width: 180px;">
                         <label style="font-size: 11px; color: #a0aec0; display: block; margin-bottom: 4px;">FROM (ORIGIN STATION)</label>
                         <select id="route-from-select" style="width: 100%; padding: 8px; background: #1e242e; color: #fff; border: 1px solid #3a4250; border-radius: 6px;">
                             <option value="">Select origin station...</option>
                         </select>
                     </div>
-                    <div style="flex: 1; min-width: 200px;">
+                    <div style="align-self: flex-end; margin-bottom: 2px;">
+                        <button id="swap-stations-btn" style="padding: 8px 12px; background: #2a313d; border: 1px solid #3a4250; border-radius: 6px; color: #00e5ff; font-weight: bold; cursor: pointer; font-size: 14px;" title="Switch Stations">🔁</button>
+                    </div>
+                    <div style="flex: 1; min-width: 180px;">
                         <label style="font-size: 11px; color: #a0aec0; display: block; margin-bottom: 4px;">TO (DESTINATION STATION)</label>
                         <select id="route-to-select" style="width: 100%; padding: 8px; background: #1e242e; color: #fff; border: 1px solid #3a4250; border-radius: 6px;">
                             <option value="">Select destination station...</option>
@@ -126,6 +129,11 @@
                     <div style="align-self: flex-end;">
                         <button id="find-routes-btn" style="padding: 9px 18px; background: #0066cc; border: none; border-radius: 6px; color: #fff; font-weight: bold; cursor: pointer;">🔍 Find Trains</button>
                     </div>
+                </div>
+                <!-- Recently Used Station Pairs -->
+                <div id="recent-pairs-container" style="margin-bottom: 16px; display: none;">
+                    <span style="font-size: 11px; color: #a0aec0; margin-right: 8px;">Recent searches:</span>
+                    <div id="recent-pairs-chips" style="display: inline-flex; gap: 6px; flex-wrap: wrap;"></div>
                 </div>
                 <div id="route-results-container">
                     <p style="text-align: center; color: #a0aec0; padding: 20px;">Select origin and destination stations above to view all scheduled trains for the day.</p>

@@ -29,6 +29,15 @@ function formatSecondsToTime(totalSec) {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function stripSeconds(timeStr) {
+    if (!timeStr) return '';
+    const parts = timeStr.split(':');
+    if (parts.length >= 2) {
+        return `${parts[0]}:${parts[1]}`;
+    }
+    return timeStr;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     initMap();
     initControls();
@@ -39,7 +48,11 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function initMap() {
-    map = L.map('map').setView([45.8, 16.5], 8);
+    // Zoomed between Zagreb Zapadni kolodvor [45.8117, 15.9525] and Prečec [45.8078, 16.3262]
+    map = L.map('map').fitBounds([
+        [45.8117, 15.9525], // Zagreb Zapadni kolodvor
+        [45.8078, 16.3262]  // Prečec
+    ], { padding: [40, 40] });
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
@@ -360,6 +373,22 @@ function initNavHandlers() {
         findRoutePlans();
     });
 
+    const swapBtn = document.getElementById('swap-stations-btn');
+    if (swapBtn) {
+        swapBtn.addEventListener('click', () => {
+            const fromSel = document.getElementById('route-from-select');
+            const toSel = document.getElementById('route-to-select');
+            const temp = fromSel.value;
+            fromSel.value = toSel.value;
+            toSel.value = temp;
+            if (fromSel.value && toSel.value) {
+                findRoutePlans();
+            }
+        });
+    }
+
+    renderRecentPairs();
+
     // Close modals on clicking overlay background
     [activeTrainsModal, dashboardModal, delaysStreamModal].forEach(modal => {
         modal.addEventListener('click', (e) => {
@@ -578,15 +607,65 @@ async function openDashboardModal() {
     }
 }
 
+function saveRecentPair(fromId, fromName, toId, toName) {
+    if (!fromId || !toId || fromId === toId) return;
+    try {
+        let pairs = JSON.parse(localStorage.getItem('hz_recent_pairs') || '[]');
+        pairs = pairs.filter(p => !(p.fromId === fromId && p.toId === toId));
+        pairs.unshift({ fromId, fromName, toId, toName });
+        if (pairs.length > 5) pairs = pairs.slice(0, 5);
+        localStorage.setItem('hz_recent_pairs', JSON.stringify(pairs));
+        renderRecentPairs();
+    } catch (e) {
+        console.error('Failed to save recent pair:', e);
+    }
+}
+
+function renderRecentPairs() {
+    const container = document.getElementById('recent-pairs-container');
+    const chips = document.getElementById('recent-pairs-chips');
+    if (!container || !chips) return;
+
+    try {
+        const pairs = JSON.parse(localStorage.getItem('hz_recent_pairs') || '[]');
+        if (pairs.length === 0) {
+            container.style.display = 'none';
+            return;
+        }
+
+        chips.innerHTML = '';
+        pairs.forEach(p => {
+            const btn = document.createElement('button');
+            btn.style.cssText = 'background: #2a313d; border: 1px solid #3a4250; color: #00e5ff; font-size: 11px; padding: 3px 8px; border-radius: 12px; cursor: pointer;';
+            btn.textContent = `${p.fromName} ➔ ${p.toName}`;
+            btn.onclick = () => {
+                document.getElementById('route-from-select').value = p.fromId;
+                document.getElementById('route-to-select').value = p.toId;
+                findRoutePlans();
+            };
+            chips.appendChild(btn);
+        });
+        container.style.display = 'block';
+    } catch (e) {
+        container.style.display = 'none';
+    }
+}
+
 async function findRoutePlans() {
-    const fromId = document.getElementById('route-from-select').value;
-    const toId = document.getElementById('route-to-select').value;
+    const fromSelect = document.getElementById('route-from-select');
+    const toSelect = document.getElementById('route-to-select');
+    const fromId = fromSelect.value;
+    const toId = toSelect.value;
     const resultsContainer = document.getElementById('route-results-container');
 
     if (!fromId || !toId) {
         resultsContainer.innerHTML = '<p style="text-align: center; color: #ef4444; padding: 10px;">Please select both origin and destination stations.</p>';
         return;
     }
+
+    const fromName = fromSelect.options[fromSelect.selectedIndex]?.text || '';
+    const toName = toSelect.options[toSelect.selectedIndex]?.text || '';
+    saveRecentPair(fromId, fromName, toId, toName);
 
     resultsContainer.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 10px;">Searching routes...</p>';
 
@@ -612,12 +691,15 @@ async function findRoutePlans() {
 
             const badgeStr = isNext ? '<span style="background: #00e5ff; color: #0f1217; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-left: 6px;">NEXT DEPARTURE</span>' : '';
 
+            const depTimeHM = stripSeconds(r.departure_time);
+            const arrTimeHM = stripSeconds(r.arrival_time);
+
             rowsHTML += `
                 <tr style="${rowStyle} cursor: pointer;" class="route-plan-row" data-depsec="${r.departure_seconds}">
+                    <td style="padding: 10px;">🕒 ${depTimeHM} ➔ ${arrTimeHM} <span style="color: #a0aec0; font-size: 11px;">(${r.duration_minutes} min)</span></td>
                     <td style="padding: 10px;"><strong>Train ${r.train_number}</strong>${badgeStr}</td>
                     <td style="padding: 10px;">🚩 ${r.origin_station_name}</td>
                     <td style="padding: 10px;">🏁 ${r.destination_station_name}</td>
-                    <td style="padding: 10px;">🕒 ${r.departure_time} ➔ ${r.arrival_time} (${r.duration_minutes} min)</td>
                     <td style="padding: 10px;">${delayStr}</td>
                 </tr>
             `;
@@ -627,10 +709,10 @@ async function findRoutePlans() {
             <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
                 <thead>
                     <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
+                        <th style="padding: 8px;">Departure ➔ Arrival</th>
                         <th style="padding: 8px;">Train</th>
                         <th style="padding: 8px;">Origin</th>
                         <th style="padding: 8px;">Destination</th>
-                        <th style="padding: 8px;">Departure ➔ Arrival</th>
                         <th style="padding: 8px;">Status</th>
                     </tr>
                 </thead>
@@ -828,9 +910,9 @@ async function openStationTimetable(station) {
             <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
                 <thead>
                     <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
+                        <th style="padding: 4px;">Arr / Dep</th>
                         <th style="padding: 4px;">Train</th>
                         <th style="padding: 4px;">Destination</th>
-                        <th style="padding: 4px;">Arr / Dep</th>
                         <th style="padding: 4px;">Status</th>
                     </tr>
                 </thead>
@@ -843,10 +925,12 @@ async function openStationTimetable(station) {
                 const delayVal = typeof e.delay_minutes === 'number' ? e.delay_minutes : 0;
                 const delayStr = delayVal > 0 ? `<span style="color: #ef4444;">+${delayVal}m</span>` : `<span style="color: #10b981;">On Time</span>`;
                 const dest = e.destination_station_name || e.headsign || 'N/A';
+                const arrHM = stripSeconds(e.arrival_time);
+                const depHM = stripSeconds(e.departure_time);
                 timetableHTML += `<tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="timetable-row" data-train="${e.train_number}">
+                    <td style="padding: 6px 4px;">🕒 ${arrHM} / ${depHM}</td>
                     <td style="padding: 6px 4px;"><strong>Train ${e.train_number}</strong></td>
                     <td style="padding: 6px 4px; color: #e2e8f0; font-weight: 500;">🏁 ${dest}</td>
-                    <td style="padding: 6px 4px;">${e.arrival_time} / ${e.departure_time}</td>
                     <td style="padding: 6px 4px;">${delayStr}</td>
                 </tr>`;
             });
