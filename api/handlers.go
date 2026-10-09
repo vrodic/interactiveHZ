@@ -424,15 +424,26 @@ func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
 			segmentMap[key] = seg
 		}
 
-		seg.Trains = append(seg.Trains, TrainSegmentSpeed{
-			TrainNumber:     trainNum,
-			TripID:          tripID,
-			Headsign:        headsign,
-			ScheduledDepSec: depSec,
-			ScheduledArrSec: arrSec,
-			DurationMinutes: durationMins,
-			SpeedKmh:        speedKmh,
-		})
+		// Deduplicate train entries for the segment by train number and schedule
+		isDup := false
+		for _, tr := range seg.Trains {
+			if tr.TrainNumber == trainNum && tr.ScheduledDepSec == depSec && tr.ScheduledArrSec == arrSec {
+				isDup = true
+				break
+			}
+		}
+
+		if !isDup {
+			seg.Trains = append(seg.Trains, TrainSegmentSpeed{
+				TrainNumber:     trainNum,
+				TripID:          tripID,
+				Headsign:        headsign,
+				ScheduledDepSec: depSec,
+				ScheduledArrSec: arrSec,
+				DurationMinutes: durationMins,
+				SpeedKmh:        speedKmh,
+			})
+		}
 	}
 
 	segments := make([]SegmentSpeed, 0, len(segmentMap))

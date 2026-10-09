@@ -5,6 +5,9 @@ let segmentsData = [];
 let stationMarkersMap = {};
 let trainMarkersMap = {};
 let segmentLinesMap = {};
+let segmentsLayerGroup = L.layerGroup();
+let segmentBadgesLayerGroup = L.layerGroup();
+let currentOpenedTripId = null;
 
 let currentTimeSec = getCurrentSecondsOfDay();
 let isRealtime = true;
@@ -41,6 +44,25 @@ function initMap() {
         maxZoom: 19,
         attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
+
+    segmentsLayerGroup.addTo(map);
+    segmentBadgesLayerGroup.addTo(map);
+
+    map.on('zoomend', updateSegmentVisibility);
+}
+
+function updateSegmentVisibility() {
+    const zoom = map.getZoom();
+    if (zoom < 8) {
+        if (map.hasLayer(segmentsLayerGroup)) map.removeLayer(segmentsLayerGroup);
+        if (map.hasLayer(segmentBadgesLayerGroup)) map.removeLayer(segmentBadgesLayerGroup);
+    } else if (zoom < 10) {
+        if (!map.hasLayer(segmentsLayerGroup)) map.addLayer(segmentsLayerGroup);
+        if (map.hasLayer(segmentBadgesLayerGroup)) map.removeLayer(segmentBadgesLayerGroup);
+    } else {
+        if (!map.hasLayer(segmentsLayerGroup)) map.addLayer(segmentsLayerGroup);
+        if (!map.hasLayer(segmentBadgesLayerGroup)) map.addLayer(segmentBadgesLayerGroup);
+    }
 }
 
 function initControls() {
@@ -137,6 +159,7 @@ function initControls() {
 
     document.getElementById('close-panel').addEventListener('click', () => {
         document.getElementById('side-panel').style.display = 'none';
+        currentOpenedTripId = null;
     });
 }
 
@@ -309,13 +332,17 @@ function renderStations() {
 }
 
 function renderSegments() {
+    segmentsLayerGroup.clearLayers();
+    segmentBadgesLayerGroup.clearLayers();
+
     segmentsData.forEach(seg => {
         const key = `${seg.from_stop_id}-${seg.to_stop_id}`;
         const line = L.polyline([[seg.from_lat, seg.from_lon], [seg.to_lat, seg.to_lon]], {
             color: '#3b82f6',
             weight: 3,
             opacity: 0.6
-        }).addTo(map);
+        });
+        segmentsLayerGroup.addLayer(line);
 
         const midLat = (seg.from_lat + seg.to_lat) / 2;
         const midLon = (seg.from_lon + seg.to_lon) / 2;
@@ -327,7 +354,8 @@ function renderSegments() {
             iconAnchor: [30, 10]
         });
 
-        const labelMarker = L.marker([midLat, midLon], { icon: speedLabelIcon }).addTo(map);
+        const labelMarker = L.marker([midLat, midLon], { icon: speedLabelIcon });
+        segmentBadgesLayerGroup.addLayer(labelMarker);
 
         const clickHandler = () => {
             openSegmentDetails(seg);
@@ -338,6 +366,8 @@ function renderSegments() {
 
         segmentLinesMap[key] = { line, labelMarker };
     });
+
+    updateSegmentVisibility();
 }
 
 function openSegmentDetails(seg) {
@@ -436,8 +466,17 @@ async function fetchActiveTrains() {
         const resp = await fetch(`/api/active-trains?time=${formatSecondsToTime(currentTimeSec)}`);
         activeTrainsData = await resp.json();
         updateTrainMarkers();
+        updateOpenTrainDetailsIfActive();
     } catch (e) {
         console.error('Failed to fetch active trains:', e);
+    }
+}
+
+function updateOpenTrainDetailsIfActive() {
+    if (!currentOpenedTripId) return;
+    const train = activeTrainsData.find(t => t.trip_id === currentOpenedTripId || t.train_number === currentOpenedTripId);
+    if (train) {
+        updateTrainDetailsPanel(train, false);
     }
 }
 
@@ -446,6 +485,11 @@ function updateTrainMarkers() {
 }
 
 function openTrainDetails(train) {
+    currentOpenedTripId = train.trip_id || train.train_number;
+    updateTrainDetailsPanel(train, true);
+}
+
+function updateTrainDetailsPanel(train, isNewOpen = false) {
     const panel = document.getElementById('side-panel');
     const content = document.getElementById('panel-content');
 
@@ -455,6 +499,13 @@ function openTrainDetails(train) {
 
     const originStation = train.first_station_name || 'Origin Station';
     const destStation = train.last_station_name || 'Destination Station';
+
+    // Preserve existing live-delay-result HTML if updating in place
+    let liveResultHTML = '';
+    const existingResultDiv = document.getElementById('live-delay-result');
+    if (!isNewOpen && existingResultDiv) {
+        liveResultHTML = existingResultDiv.innerHTML;
+    }
 
     content.innerHTML = `
         <div class="panel-header">
@@ -486,7 +537,7 @@ function openTrainDetails(train) {
             <div class="detail-value">${train.delay_minutes > 0 ? `<span style="color:#ef4444; font-weight:bold;">Running with +${train.delay_minutes} min delay (position auto-adjusted on map)</span>` : '<span style="color:#10b981; font-weight:bold;">On Time</span>'}</div>
         </div>
         <button class="refresh-delay-btn" id="check-delay-btn">📡 Refresh Live Delay Status</button>
-        <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;"></div>
+        <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;">${liveResultHTML}</div>
     `;
 
     panel.style.display = 'block';
@@ -502,6 +553,8 @@ function openTrainDetails(train) {
                 const liveDelayMins = live.delayMinutes || 0;
                 const liveDelayStr = liveDelayMins > 0 ? `+${liveDelayMins} min` : 'On Time / No Delay';
 
+                train.delay_minutes = liveDelayMins;
+
                 resultDiv.innerHTML = `
                     <div style="background: #1e242e; padding: 10px; border-radius: 6px; border: 1px solid #3a4250;">
                         <div><strong>Status:</strong> ${live.positionStatus || 'Unknown'}</div>
@@ -511,7 +564,10 @@ function openTrainDetails(train) {
                     </div>
                 `;
 
-                // Immediately trigger active trains fetch to adjust map positions with new delay data
+                // Re-render the panel content immediately so badge and delay status text update
+                updateTrainDetailsPanel(train, false);
+
+                // Trigger active trains fetch to adjust map positions with new delay data
                 fetchActiveTrains();
             } else {
                 resultDiv.innerHTML = '<span style="color: #ef4444;">No live status available for this train.</span>';
