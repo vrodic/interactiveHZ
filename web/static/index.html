@@ -13,18 +13,33 @@
         <header id="header">
             <div class="logo-section">
                 <span class="logo-badge">HŽ PP</span>
-                <span class="title">Interactive Map</span>
+                <span class="title">Interactive Train Map</span>
             </div>
-            <nav class="nav-menu">
-                <button id="nav-active-trains" class="nav-btn">🚆 Active Trains</button>
-                <button id="nav-routes" class="nav-btn">🗺️ Trip Planner</button>
-                <button id="nav-dashboard" class="nav-btn">📊 Dashboard</button>
-            </nav>
             <div class="search-section">
                 <input type="text" id="search-input" class="search-input" placeholder="Search station or train...">
                 <div id="search-results" class="search-results"></div>
             </div>
         </header>
+
+        <!-- Left Hand Navigation Strip / Sidebar -->
+        <div id="left-sidebar">
+            <button id="nav-active-trains" class="sidebar-btn" title="Active Trains">
+                <span class="sidebar-icon">🚆</span>
+                <span class="sidebar-label">Active Trains</span>
+            </button>
+            <button id="nav-routes" class="sidebar-btn" title="Trip Planner">
+                <span class="sidebar-icon">🗺️</span>
+                <span class="sidebar-label">Trip Planner</span>
+            </button>
+            <button id="nav-dashboard" class="sidebar-btn" title="Dashboard">
+                <span class="sidebar-icon">📊</span>
+                <span class="sidebar-label">Dashboard</span>
+            </button>
+            <button id="nav-delays-stream" class="sidebar-btn" title="Live Delay Stream">
+                <span class="sidebar-icon">⚡</span>
+                <span class="sidebar-label">Live Delays</span>
+            </button>
+        </div>
 
         <div id="map"></div>
 
@@ -52,6 +67,25 @@
                 </div>
                 <div class="modal-body" id="active-trains-modal-body">
                     <!-- Dynamic Table -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Live Delay Stream Modal -->
+        <div id="delays-stream-modal" class="modal-overlay" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <span class="panel-title">⚡ Real-Time Delay Process Feed</span>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span id="stream-status-badge" style="font-size: 11px; background: #10b981; color: #fff; padding: 2px 8px; border-radius: 10px; font-weight: bold;">LIVE SSE</span>
+                        <button class="close-btn" id="close-delays-stream-modal">&times;</button>
+                    </div>
+                </div>
+                <div class="modal-body">
+                    <p style="font-size: 13px; color: #a0aec0; margin-bottom: 12px;">Live feed streaming train delay updates, background polling activity, and status changes in real time.</p>
+                    <div id="delays-stream-log" style="background: #0d1117; border: 1px solid #2a313d; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
+                        <div style="color: #6e7681;">[System] Connecting to real-time delay event stream...</div>
+                    </div>
                 </div>
             </div>
         </div>

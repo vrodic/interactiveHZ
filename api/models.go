@@ -31,8 +31,10 @@ type RoutePlanEntry struct {
 	DestinationStationName string `json:"destination_station_name"`
 	DepartureTime          string `json:"departure_time"`
 	ArrivalTime            string `json:"arrival_time"`
+	DepartureSeconds       int    `json:"departure_seconds"`
 	DurationMinutes        int    `json:"duration_minutes"`
 	DelayMinutes           int    `json:"delay_minutes"`
+	IsNearestFuture        bool   `json:"is_nearest_future,omitempty"`
 }
 
 type DashboardStats struct {
@@ -44,6 +46,16 @@ type DashboardStats struct {
 	TotalStations       int           `json:"total_stations"`
 	TotalTripsToday     int           `json:"total_trips_today"`
 	RecentDelayedTrains []ActiveTrain `json:"recent_delayed_trains"`
+}
+
+type SearchResultItem struct {
+	Type        string  `json:"type"` // "station" or "train"
+	ID          string  `json:"id"`
+	Title       string  `json:"title"`
+	Subtitle    string  `json:"subtitle"`
+	Lat         float64 `json:"lat"`
+	Lon         float64 `json:"lon"`
+	TrainNumber string  `json:"train_number,omitempty"`
 }
 
 type ActiveTrain struct {

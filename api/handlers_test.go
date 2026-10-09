@@ -146,6 +146,32 @@ func TestPlanRoute(t *testing.T) {
 	}
 }
 
+func TestSearch(t *testing.T) {
+	srv := setupTestDB(t)
+
+	req := httptest.NewRequest("GET", "/api/search?q=Zagreb", nil)
+	w := httptest.NewRecorder()
+
+	srv.Search(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK, got %d", res.StatusCode)
+	}
+
+	var results []SearchResultItem
+	if err := json.NewDecoder(res.Body).Decode(&results); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if len(results) == 0 {
+		t.Fatalf("Expected at least 1 search result for 'Zagreb'")
+	}
+	if results[0].Title != "Zagreb Glavni Kolodvor" {
+		t.Errorf("Expected Zagreb Glavni Kolodvor, got %s", results[0].Title)
+	}
+}
+
 func TestGetDashboardStats(t *testing.T) {
 	srv := setupTestDB(t)
 

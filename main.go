@@ -55,11 +55,13 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/api/search", server.Search)
 	mux.HandleFunc("/api/stations", server.GetStations)
 	mux.HandleFunc("/api/stations/", server.GetStationTimetable)
 	mux.HandleFunc("/api/active-trains", server.GetActiveTrains)
 	mux.HandleFunc("/api/segments", server.GetSegments)
 	mux.HandleFunc("/api/train-delay", server.FetchTrainDelay)
+	mux.HandleFunc("/api/delays/stream", server.StreamDelays)
 	mux.HandleFunc("/api/routes/plan", server.PlanRoute)
 	mux.HandleFunc("/api/dashboard", server.GetDashboardStats)
 

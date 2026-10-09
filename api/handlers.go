@@ -13,15 +13,56 @@ import (
 	"time"
 )
 
+type Broadcaster struct {
+	clients map[chan string]bool
+	mu      sync.Mutex
+}
+
+func NewBroadcaster() *Broadcaster {
+	return &Broadcaster{
+		clients: make(map[chan string]bool),
+	}
+}
+
+func (b *Broadcaster) Subscribe() chan string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ch := make(chan string, 100)
+	b.clients[ch] = true
+	return ch
+}
+
+func (b *Broadcaster) Unsubscribe(ch chan string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.clients[ch]; ok {
+		delete(b.clients, ch)
+		close(ch)
+	}
+}
+
+func (b *Broadcaster) Broadcast(msg string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for ch := range b.clients {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+}
+
 type Server struct {
-	db         *sql.DB
-	delayCache sync.Map
-	routeCache sync.Map
+	db          *sql.DB
+	delayCache  sync.Map
+	routeCache  sync.Map
+	broadcaster *Broadcaster
 }
 
 func NewServer(db *sql.DB) *Server {
 	return &Server{
-		db: db,
+		db:          db,
+		broadcaster: NewBroadcaster(),
 	}
 }
 
@@ -126,6 +167,79 @@ func interpolateAlongPath(path []LatLon, progress float64) (float64, float64) {
 	}
 
 	return path[len(path)-1].Lat, path[len(path)-1].Lon
+}
+
+func (s *Server) Search(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(q) < 2 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]SearchResultItem{})
+		return
+	}
+
+	likeQ := "%" + q + "%"
+	results := make([]SearchResultItem, 0)
+
+	// 1. Search stations
+	stRows, err := s.db.Query(`
+		SELECT stop_id, stop_name, stop_lat, stop_lon
+		FROM stations
+		WHERE stop_name LIKE ?
+		ORDER BY stop_name ASC
+		LIMIT 10
+	`, likeQ)
+	if err == nil {
+		for stRows.Next() {
+			var st Station
+			if err := stRows.Scan(&st.StopID, &st.StopName, &st.Lat, &st.Lon); err == nil {
+				results = append(results, SearchResultItem{
+					Type:     "station",
+					ID:       st.StopID,
+					Title:    st.StopName,
+					Subtitle: "Station",
+					Lat:      st.Lat,
+					Lon:      st.Lon,
+				})
+			}
+		}
+		stRows.Close()
+	}
+
+	// 2. Search trains by train number or headsign
+	trRows, err := s.db.Query(`
+		SELECT DISTINCT COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
+		       s.stop_lat, s.stop_lon
+		FROM trips t
+		JOIN stop_times st ON t.trip_id = st.trip_id AND st.stop_sequence = 1
+		JOIN stations s ON st.stop_id = s.stop_id
+		WHERE t.trip_short_name LIKE ? OR t.trip_id LIKE ? OR t.trip_headsign LIKE ?
+		LIMIT 10
+	`, likeQ, likeQ, likeQ)
+	if err == nil {
+		for trRows.Next() {
+			var trNum, headsign string
+			var lat, lon float64
+			if err := trRows.Scan(&trNum, &headsign, &lat, &lon); err == nil {
+				sub := "Train"
+				if headsign != "" {
+					sub = "Train - " + headsign
+				}
+				results = append(results, SearchResultItem{
+					Type:        "train",
+					ID:          trNum,
+					Title:       "Train " + trNum,
+					Subtitle:    sub,
+					Lat:         lat,
+					Lon:         lon,
+					TrainNumber: trNum,
+				})
+			}
+		}
+		trRows.Close()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
 }
 
 func (s *Server) GetStations(w http.ResponseWriter, r *http.Request) {
@@ -521,10 +635,61 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 			VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		`, trainID, todayDate, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
 
+		// Broadcast event via SSE broadcaster
+		eventJSON, _ := json.Marshal(map[string]interface{}{
+			"type":            "delay_update",
+			"train_number":    trainID,
+			"delay_minutes":   delayMins,
+			"position_status": delayResp.Data.PositionStatus,
+			"last_station":    delayResp.Data.LastStation,
+			"next_station":    nextSt,
+			"timestamp":       time.Now().Format("15:04:05"),
+		})
+		s.broadcaster.Broadcast(string(eventJSON))
+
 		return &delayResp, nil
 	}
 
 	return nil, fmt.Errorf("failed to parse live delay for train %s", trainID)
+}
+
+func (s *Server) StreamDelays(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ch := s.broadcaster.Subscribe()
+	defer s.broadcaster.Unsubscribe(ch)
+
+	// Send initial connection event
+	initJSON, _ := json.Marshal(map[string]interface{}{
+		"type":      "connected",
+		"message":   "Connected to HŽ real-time delay update stream",
+		"timestamp": time.Now().Format("15:04:05"),
+	})
+	fmt.Fprintf(w, "data: %s\n\n", initJSON)
+	flusher.Flush()
+
+	notify := r.Context().Done()
+	for {
+		select {
+		case <-notify:
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", msg)
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) FetchTrainDelay(w http.ResponseWriter, r *http.Request) {
@@ -600,10 +765,17 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	nowSec := time.Now().Hour()*3600 + time.Now().Minute()*60 + time.Now().Second()
+	if tsStr := r.URL.Query().Get("time"); tsStr != "" {
+		if sec, err := strconv.Atoi(tsStr); err == nil {
+			nowSec = sec
+		}
+	}
+
 	query := `
-		SELECT st1.trip_id, COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
+		SELECT MIN(st1.trip_id), COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
 		       s1.stop_name as origin_name, s2.stop_name as dest_name,
-		       st1.departure_time, st2.arrival_time,
+		       st1.departure_time, st2.arrival_time, st1.departure_seconds,
 		       (st2.arrival_seconds - st1.departure_seconds) / 60 as duration
 		FROM stop_times st1
 		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence > st1.stop_sequence
@@ -612,6 +784,7 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 		JOIN trips t ON st1.trip_id = t.trip_id
 		WHERE (st1.stop_id = ? OR s1.stop_name LIKE ?)
 		  AND (st2.stop_id = ? OR s2.stop_name LIKE ?)
+		GROUP BY train_num, st1.departure_seconds, st2.arrival_seconds
 		ORDER BY st1.departure_seconds ASC
 	`
 
@@ -628,7 +801,7 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 	results := make([]RoutePlanEntry, 0)
 	for rows.Next() {
 		var entry RoutePlanEntry
-		if err := rows.Scan(&entry.TripID, &entry.TrainNumber, &entry.Headsign, &entry.OriginStationName, &entry.DestinationStationName, &entry.DepartureTime, &entry.ArrivalTime, &entry.DurationMinutes); err != nil {
+		if err := rows.Scan(&entry.TripID, &entry.TrainNumber, &entry.Headsign, &entry.OriginStationName, &entry.DestinationStationName, &entry.DepartureTime, &entry.ArrivalTime, &entry.DepartureSeconds, &entry.DurationMinutes); err != nil {
 			continue
 		}
 
@@ -639,6 +812,27 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 		}
 
 		results = append(results, entry)
+	}
+
+	// Find the train with departure time in the nearest future relative to nowSec
+	nearestIdx := -1
+	minFutureDiff := 86400 * 2
+
+	for i, r := range results {
+		diff := r.DepartureSeconds - nowSec
+		if diff >= 0 && diff < minFutureDiff {
+			minFutureDiff = diff
+			nearestIdx = i
+		}
+	}
+
+	// If no future train today, select the earliest train
+	if nearestIdx == -1 && len(results) > 0 {
+		nearestIdx = 0
+	}
+
+	if nearestIdx >= 0 && nearestIdx < len(results) {
+		results[nearestIdx].IsNearestFuture = true
 	}
 
 	w.Header().Set("Content-Type", "application/json")
