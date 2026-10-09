@@ -51,6 +51,7 @@ func main() {
 	}()
 
 	server := api.NewServer(database)
+	server.StartBackgroundDelayWorker()
 
 	mux := http.NewServeMux()
 
@@ -59,6 +60,8 @@ func main() {
 	mux.HandleFunc("/api/active-trains", server.GetActiveTrains)
 	mux.HandleFunc("/api/segments", server.GetSegments)
 	mux.HandleFunc("/api/train-delay", server.FetchTrainDelay)
+	mux.HandleFunc("/api/routes/plan", server.PlanRoute)
+	mux.HandleFunc("/api/dashboard", server.GetDashboardStats)
 
 	staticSubFS, err := fs.Sub(staticEmbedFS, "web/static")
 	if err != nil {

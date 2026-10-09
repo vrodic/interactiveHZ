@@ -118,3 +118,56 @@ func TestGetActiveTrains(t *testing.T) {
 		t.Errorf("Expected progress around 0.5, got %f", train.Progress)
 	}
 }
+
+func TestPlanRoute(t *testing.T) {
+	srv := setupTestDB(t)
+
+	req := httptest.NewRequest("GET", "/api/routes/plan?from=s1&to=s2", nil)
+	w := httptest.NewRecorder()
+
+	srv.PlanRoute(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK, got %d", res.StatusCode)
+	}
+
+	var plan []RoutePlanEntry
+	if err := json.NewDecoder(res.Body).Decode(&plan); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if len(plan) != 1 {
+		t.Fatalf("Expected 1 route plan entry, got %d", len(plan))
+	}
+
+	if plan[0].TrainNumber != "2010" {
+		t.Errorf("Expected train number 2010, got %s", plan[0].TrainNumber)
+	}
+}
+
+func TestGetDashboardStats(t *testing.T) {
+	srv := setupTestDB(t)
+
+	req := httptest.NewRequest("GET", "/api/dashboard?time=39600", nil)
+	w := httptest.NewRecorder()
+
+	srv.GetDashboardStats(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK, got %d", res.StatusCode)
+	}
+
+	var stats DashboardStats
+	if err := json.NewDecoder(res.Body).Decode(&stats); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if stats.TotalStations != 2 {
+		t.Errorf("Expected 2 total stations, got %d", stats.TotalStations)
+	}
+	if stats.ActiveTrainCount != 1 {
+		t.Errorf("Expected 1 active train, got %d", stats.ActiveTrainCount)
+	}
+}

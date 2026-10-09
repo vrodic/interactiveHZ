@@ -1,11 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -164,9 +164,14 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 
 	query := `
 		SELECT MIN(st.trip_id), COALESCE(t.trip_short_name, t.trip_id) AS train_num, COALESCE(t.trip_headsign, ''),
+		       COALESCE(last_s.stop_name, COALESCE(t.trip_headsign, '')),
 		       st.arrival_time, st.departure_time, MIN(st.stop_sequence)
 		FROM stop_times st
 		JOIN trips t ON st.trip_id = t.trip_id
+		LEFT JOIN stop_times st_last ON st_last.trip_id = t.trip_id AND st_last.stop_sequence = (
+			SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id
+		)
+		LEFT JOIN stations last_s ON st_last.stop_id = last_s.stop_id
 		WHERE st.stop_id = ?
 		GROUP BY train_num, st.departure_time, st.arrival_time
 		ORDER BY st.departure_seconds ASC
@@ -183,8 +188,11 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 	entries := make([]StationTimetableEntry, 0)
 	for rows.Next() {
 		var entry StationTimetableEntry
-		if err := rows.Scan(&entry.TripID, &entry.TrainNumber, &entry.Headsign, &entry.ArrivalTime, &entry.DepartureTime, &entry.StopSequence); err != nil {
+		if err := rows.Scan(&entry.TripID, &entry.TrainNumber, &entry.Headsign, &entry.DestinationStationName, &entry.ArrivalTime, &entry.DepartureTime, &entry.StopSequence); err != nil {
 			continue
+		}
+		if entry.DestinationStationName == "" {
+			entry.DestinationStationName = entry.Headsign
 		}
 
 		var delayMins int
@@ -463,33 +471,23 @@ func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(segments)
 }
 
-func (s *Server) FetchTrainDelay(w http.ResponseWriter, r *http.Request) {
-	trainID := r.URL.Query().Get("trainId")
-	if trainID == "" {
-		http.Error(w, "trainId parameter is required", http.StatusBadRequest)
-		return
-	}
-
+func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, error) {
 	url := fmt.Sprintf("https://hzpp.app/api/train-delay?trainId=%s", trainID)
 	client := &http.Client{Timeout: 8 * time.Second}
 
 	resp, err := client.Get(url)
 	if err != nil {
-		log.Printf("Error fetching train delay from hzpp.app for train %s: %v", trainID, err)
 		if cached, ok := s.delayCache.Load(trainID); ok {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(cached)
-			return
+			c := cached.(DelayAPIResponse)
+			return &c, nil
 		}
-		http.Error(w, fmt.Sprintf("Failed to fetch live delay: %v", err), http.StatusBadGateway)
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, err
 	}
 
 	var delayResp DelayAPIResponse
@@ -505,6 +503,8 @@ func (s *Server) FetchTrainDelay(w http.ResponseWriter, r *http.Request) {
 			nextSt = *delayResp.Data.NextStation
 		}
 
+		todayDate := time.Now().Format("2006-01-02")
+
 		_, _ = s.db.Exec(`
 			INSERT INTO train_delays (train_number, delay_minutes, position_status, last_station, next_station, updated_at)
 			VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -515,8 +515,192 @@ func (s *Server) FetchTrainDelay(w http.ResponseWriter, r *http.Request) {
 				next_station=excluded.next_station,
 				updated_at=CURRENT_TIMESTAMP
 		`, trainID, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
+
+		_, _ = s.db.Exec(`
+			INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`, trainID, todayDate, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
+
+		return &delayResp, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse live delay for train %s", trainID)
+}
+
+func (s *Server) FetchTrainDelay(w http.ResponseWriter, r *http.Request) {
+	trainID := r.URL.Query().Get("trainId")
+	if trainID == "" {
+		http.Error(w, "trainId parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	delayResp, err := s.FetchAndSaveTrainDelay(trainID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch live delay: %v", err), http.StatusBadGateway)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(body)
+	json.NewEncoder(w).Encode(delayResp)
 }
+
+func (s *Server) StartBackgroundDelayWorker() {
+	lastQueried := make(map[string]time.Time)
+	var mu sync.Mutex
+
+	ticker := time.NewTicker(20 * time.Second)
+	go func() {
+		for range ticker.C {
+			nowSec := time.Now().Hour()*3600 + time.Now().Minute()*60 + time.Now().Second()
+
+			query := `
+				SELECT DISTINCT COALESCE(t.trip_short_name, t.trip_id)
+				FROM stop_times st1
+				JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
+				JOIN trips t ON st1.trip_id = t.trip_id
+				WHERE st1.departure_seconds <= ? AND st2.arrival_seconds >= ?
+			`
+			rows, err := s.db.Query(query, nowSec+1800, nowSec-10800)
+			if err != nil {
+				continue
+			}
+
+			var trainNums []string
+			for rows.Next() {
+				var tn string
+				if err := rows.Scan(&tn); err == nil && tn != "" {
+					trainNums = append(trainNums, tn)
+				}
+			}
+			rows.Close()
+
+			for _, tn := range trainNums {
+				mu.Lock()
+				lastTime, exists := lastQueried[tn]
+				if exists && time.Since(lastTime) < 60*time.Second {
+					mu.Unlock()
+					continue
+				}
+				lastQueried[tn] = time.Now()
+				mu.Unlock()
+
+				_, _ = s.FetchAndSaveTrainDelay(tn)
+				time.Sleep(3 * time.Second)
+			}
+		}
+	}()
+}
+
+func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+
+	if from == "" || to == "" {
+		http.Error(w, "both 'from' and 'to' station parameters are required", http.StatusBadRequest)
+		return
+	}
+
+	query := `
+		SELECT st1.trip_id, COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
+		       s1.stop_name as origin_name, s2.stop_name as dest_name,
+		       st1.departure_time, st2.arrival_time,
+		       (st2.arrival_seconds - st1.departure_seconds) / 60 as duration
+		FROM stop_times st1
+		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence > st1.stop_sequence
+		JOIN stations s1 ON st1.stop_id = s1.stop_id
+		JOIN stations s2 ON st2.stop_id = s2.stop_id
+		JOIN trips t ON st1.trip_id = t.trip_id
+		WHERE (st1.stop_id = ? OR s1.stop_name LIKE ?)
+		  AND (st2.stop_id = ? OR s2.stop_name LIKE ?)
+		ORDER BY st1.departure_seconds ASC
+	`
+
+	likeFrom := "%" + from + "%"
+	likeTo := "%" + to + "%"
+
+	rows, err := s.db.Query(query, from, likeFrom, to, likeTo)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	results := make([]RoutePlanEntry, 0)
+	for rows.Next() {
+		var entry RoutePlanEntry
+		if err := rows.Scan(&entry.TripID, &entry.TrainNumber, &entry.Headsign, &entry.OriginStationName, &entry.DestinationStationName, &entry.DepartureTime, &entry.ArrivalTime, &entry.DurationMinutes); err != nil {
+			continue
+		}
+
+		var delayMins int
+		err := s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ?", entry.TrainNumber).Scan(&delayMins)
+		if err == nil {
+			entry.DelayMinutes = delayMins
+		}
+
+		results = append(results, entry)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
+}
+
+func (s *Server) GetDashboardStats(w http.ResponseWriter, r *http.Request) {
+	nowSec := time.Now().Hour()*3600 + time.Now().Minute()*60 + time.Now().Second()
+
+	if tsStr := r.URL.Query().Get("time"); tsStr != "" {
+		if sec, err := strconv.Atoi(tsStr); err == nil {
+			nowSec = sec
+		}
+	}
+
+	var stats DashboardStats
+
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM stations").Scan(&stats.TotalStations)
+
+	_ = s.db.QueryRow("SELECT COUNT(DISTINCT trip_id) FROM stop_times").Scan(&stats.TotalTripsToday)
+
+	// Fetch active trains right now
+	req, _ := http.NewRequest("GET", fmt.Sprintf("/api/active-trains?time=%d", nowSec), nil)
+	rr := &dashboardResponseWriter{header: make(http.Header), body: &bytes.Buffer{}}
+	s.GetActiveTrains(rr, req)
+
+	var activeTrains []ActiveTrain
+	_ = json.Unmarshal(rr.body.Bytes(), &activeTrains)
+
+	stats.ActiveTrainCount = len(activeTrains)
+	totalDelay := 0
+	maxDelay := 0
+	recentDelayed := make([]ActiveTrain, 0)
+
+	for _, tr := range activeTrains {
+		if tr.DelayMinutes > 0 {
+			stats.DelayedTrainCount++
+			totalDelay += tr.DelayMinutes
+			if tr.DelayMinutes > maxDelay {
+				maxDelay = tr.DelayMinutes
+			}
+			recentDelayed = append(recentDelayed, tr)
+		} else {
+			stats.OnTimeTrainCount++
+		}
+	}
+
+	stats.MaxDelayMinutes = maxDelay
+	if stats.DelayedTrainCount > 0 {
+		stats.AvgDelayMinutes = float64(totalDelay) / float64(stats.DelayedTrainCount)
+	}
+	stats.RecentDelayedTrains = recentDelayed
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+type dashboardResponseWriter struct {
+	header http.Header
+	body   *bytes.Buffer
+}
+
+func (w *dashboardResponseWriter) Header() http.Header { return w.header }
+func (w *dashboardResponseWriter) Write(b []byte) (int, error) { return w.body.Write(b) }
+func (w *dashboardResponseWriter) WriteHeader(statusCode int) {}

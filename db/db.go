@@ -144,6 +144,20 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		next_station TEXT,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
+
+	CREATE TABLE IF NOT EXISTS historical_train_delays (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		train_number TEXT NOT NULL,
+		delay_date DATE NOT NULL,
+		delay_minutes INTEGER NOT NULL,
+		position_status TEXT,
+		last_station TEXT,
+		next_station TEXT,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_hist_delays_date ON historical_train_delays(delay_date);
+	CREATE INDEX IF NOT EXISTS idx_hist_delays_train_date ON historical_train_delays(train_number, delay_date);
 	`
 
 	if _, err := database.Exec(schema); err != nil {

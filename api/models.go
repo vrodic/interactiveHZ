@@ -13,13 +13,37 @@ type Station struct {
 }
 
 type StationTimetableEntry struct {
-	TripID        string `json:"trip_id"`
-	TrainNumber   string `json:"train_number"`
-	Headsign      string `json:"headsign"`
-	ArrivalTime   string `json:"arrival_time"`
-	DepartureTime string `json:"departure_time"`
-	StopSequence  int    `json:"stop_sequence"`
-	DelayMinutes  *int   `json:"delay_minutes,omitempty"`
+	TripID                 string `json:"trip_id"`
+	TrainNumber            string `json:"train_number"`
+	Headsign               string `json:"headsign"`
+	DestinationStationName string `json:"destination_station_name"`
+	ArrivalTime            string `json:"arrival_time"`
+	DepartureTime          string `json:"departure_time"`
+	StopSequence           int    `json:"stop_sequence"`
+	DelayMinutes           *int   `json:"delay_minutes,omitempty"`
+}
+
+type RoutePlanEntry struct {
+	TripID                 string `json:"trip_id"`
+	TrainNumber            string `json:"train_number"`
+	Headsign               string `json:"headsign"`
+	OriginStationName      string `json:"origin_station_name"`
+	DestinationStationName string `json:"destination_station_name"`
+	DepartureTime          string `json:"departure_time"`
+	ArrivalTime            string `json:"arrival_time"`
+	DurationMinutes        int    `json:"duration_minutes"`
+	DelayMinutes           int    `json:"delay_minutes"`
+}
+
+type DashboardStats struct {
+	ActiveTrainCount    int           `json:"active_train_count"`
+	DelayedTrainCount   int           `json:"delayed_train_count"`
+	OnTimeTrainCount    int           `json:"ontime_train_count"`
+	AvgDelayMinutes     float64       `json:"avg_delay_minutes"`
+	MaxDelayMinutes     int           `json:"max_delay_minutes"`
+	TotalStations       int           `json:"total_stations"`
+	TotalTripsToday     int           `json:"total_trips_today"`
+	RecentDelayedTrains []ActiveTrain `json:"recent_delayed_trains"`
 }
 
 type ActiveTrain struct {

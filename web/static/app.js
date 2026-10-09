@@ -32,6 +32,7 @@ function formatSecondsToTime(totalSec) {
 document.addEventListener('DOMContentLoaded', () => {
     initMap();
     initControls();
+    initNavHandlers();
     loadStations();
     loadSegments();
     startUpdateLoop();
@@ -300,6 +301,230 @@ function updateTrainMarkersClientSide() {
     });
 }
 
+function initNavHandlers() {
+    const activeTrainsModal = document.getElementById('active-trains-modal');
+    const dashboardModal = document.getElementById('dashboard-modal');
+    const tripPlannerDrawer = document.getElementById('trip-planner-drawer');
+
+    document.getElementById('nav-active-trains').addEventListener('click', () => {
+        openActiveTrainsModal();
+    });
+
+    document.getElementById('close-active-trains-modal').addEventListener('click', () => {
+        activeTrainsModal.style.display = 'none';
+    });
+
+    document.getElementById('nav-dashboard').addEventListener('click', () => {
+        openDashboardModal();
+    });
+
+    document.getElementById('close-dashboard-modal').addEventListener('click', () => {
+        dashboardModal.style.display = 'none';
+    });
+
+    document.getElementById('nav-routes').addEventListener('click', () => {
+        tripPlannerDrawer.style.display = 'flex';
+    });
+
+    document.getElementById('close-trip-planner-drawer').addEventListener('click', () => {
+        tripPlannerDrawer.style.display = 'none';
+    });
+
+    document.getElementById('find-routes-btn').addEventListener('click', () => {
+        findRoutePlans();
+    });
+
+    // Close modals on clicking overlay background
+    [activeTrainsModal, dashboardModal].forEach(modal => {
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                modal.style.display = 'none';
+            }
+        });
+    });
+}
+
+function openActiveTrainsModal() {
+    const modal = document.getElementById('active-trains-modal');
+    const body = document.getElementById('active-trains-modal-body');
+
+    let rowsHTML = '';
+    if (activeTrainsData.length === 0) {
+        rowsHTML = `<tr><td colspan="5" style="padding: 16px; text-align: center; color: #a0aec0;">No active trains at current time.</td></tr>`;
+    } else {
+        activeTrainsData.forEach(tr => {
+            const delayStr = tr.delay_minutes > 0
+                ? `<span style="color: #ef4444; font-weight: bold;">+${tr.delay_minutes} min delay</span>`
+                : `<span style="color: #10b981; font-weight: bold;">On Time</span>`;
+
+            rowsHTML += `
+                <tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="active-train-row" data-trip="${tr.trip_id}">
+                    <td style="padding: 10px;"><strong>Train ${tr.train_number}</strong></td>
+                    <td style="padding: 10px;">🚩 ${tr.first_station_name || 'N/A'}</td>
+                    <td style="padding: 10px;">🏁 ${tr.last_station_name || 'N/A'}</td>
+                    <td style="padding: 10px;">${tr.prev_station_name} ➔ ${tr.next_station_name} (${Math.round(tr.progress * 100)}%)</td>
+                    <td style="padding: 10px;">${delayStr}</td>
+                </tr>
+            `;
+        });
+    }
+
+    body.innerHTML = `
+        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+            <thead>
+                <tr style="border-bottom: 2px solid #3a4250; text-align: left; color: #a0aec0;">
+                    <th style="padding: 8px;">Train Number</th>
+                    <th style="padding: 8px;">Origin</th>
+                    <th style="padding: 8px;">Destination</th>
+                    <th style="padding: 8px;">Current Segment</th>
+                    <th style="padding: 8px;">Delay Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${rowsHTML}
+            </tbody>
+        </table>
+    `;
+
+    modal.style.display = 'flex';
+
+    body.querySelectorAll('.active-train-row').forEach(row => {
+        row.addEventListener('click', () => {
+            const tripId = row.getAttribute('data-trip');
+            const tr = activeTrainsData.find(t => t.trip_id === tripId);
+            if (tr) {
+                map.setView([tr.lat, tr.lon], 11);
+                openTrainDetails(tr);
+                modal.style.display = 'none';
+            }
+        });
+    });
+}
+
+async function openDashboardModal() {
+    const modal = document.getElementById('dashboard-modal');
+    const body = document.getElementById('dashboard-modal-body');
+
+    body.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 20px;">Loading live dashboard metrics...</p>';
+    modal.style.display = 'flex';
+
+    try {
+        const resp = await fetch(`/api/dashboard?time=${formatSecondsToTime(currentTimeSec)}`);
+        const stats = await resp.json();
+
+        let delayedRows = '';
+        if (stats.recent_delayed_trains && stats.recent_delayed_trains.length > 0) {
+            stats.recent_delayed_trains.forEach(tr => {
+                delayedRows += `
+                    <tr style="border-bottom: 1px solid #2a313d;">
+                        <td style="padding: 8px;"><strong>Train ${tr.train_number}</strong></td>
+                        <td style="padding: 8px;">${tr.first_station_name} ➔ ${tr.last_station_name}</td>
+                        <td style="padding: 8px; color: #ef4444; font-weight: bold;">+${tr.delay_minutes} min</td>
+                    </tr>
+                `;
+            });
+        } else {
+            delayedRows = `<tr><td colspan="3" style="padding: 12px; text-align: center; color: #10b981;">No delayed trains currently active! 🎉</td></tr>`;
+        }
+
+        body.innerHTML = `
+            <div class="dashboard-grid">
+                <div class="dash-card">
+                    <div class="dash-label">Active Trains</div>
+                    <div class="dash-value">${stats.active_train_count}</div>
+                </div>
+                <div class="dash-card">
+                    <div class="dash-label">Delayed Trains</div>
+                    <div class="dash-value" style="color: ${stats.delayed_train_count > 0 ? '#ef4444' : '#10b981'};">${stats.delayed_train_count}</div>
+                </div>
+                <div class="dash-card">
+                    <div class="dash-label">Average Delay</div>
+                    <div class="dash-value" style="color: #f59e0b;">${stats.avg_delay_minutes.toFixed(1)} min</div>
+                </div>
+                <div class="dash-card">
+                    <div class="dash-label">Total Stations</div>
+                    <div class="dash-value">${stats.total_stations}</div>
+                </div>
+            </div>
+
+            <h3 style="margin-bottom: 10px; color: #fff; font-size: 16px;">⚠️ Currently Delayed Trains</h3>
+            <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                <thead>
+                    <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
+                        <th style="padding: 6px;">Train</th>
+                        <th style="padding: 6px;">Route</th>
+                        <th style="padding: 6px;">Delay</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${delayedRows}
+                </tbody>
+            </table>
+        `;
+    } catch (e) {
+        body.innerHTML = `<p style="color: #ef4444; padding: 20px;">Failed to load dashboard statistics: ${e.message}</p>`;
+    }
+}
+
+async function findRoutePlans() {
+    const fromId = document.getElementById('route-from-select').value;
+    const toId = document.getElementById('route-to-select').value;
+    const resultsContainer = document.getElementById('route-results-container');
+
+    if (!fromId || !toId) {
+        resultsContainer.innerHTML = '<p style="text-align: center; color: #ef4444; padding: 10px;">Please select both origin and destination stations.</p>';
+        return;
+    }
+
+    resultsContainer.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 10px;">Searching routes...</p>';
+
+    try {
+        const resp = await fetch(`/api/routes/plan?from=${fromId}&to=${toId}`);
+        const routes = await resp.json();
+
+        if (routes.length === 0) {
+            resultsContainer.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 10px;">No direct scheduled trains found for this route.</p>';
+            return;
+        }
+
+        let rowsHTML = '';
+        routes.forEach(r => {
+            const delayStr = r.delay_minutes > 0
+                ? `<span style="color: #ef4444;">+${r.delay_minutes} min delay</span>`
+                : `<span style="color: #10b981;">On Time</span>`;
+
+            rowsHTML += `
+                <tr style="border-bottom: 1px solid #2a313d;">
+                    <td style="padding: 8px;"><strong>Train ${r.train_number}</strong></td>
+                    <td style="padding: 8px;">🚩 ${r.origin_station_name}</td>
+                    <td style="padding: 8px;">🏁 ${r.destination_station_name}</td>
+                    <td style="padding: 8px;">🕒 ${r.departure_time} ➔ ${r.arrival_time} (${r.duration_minutes} min)</td>
+                    <td style="padding: 8px;">${delayStr}</td>
+                </tr>
+            `;
+        });
+
+        resultsContainer.innerHTML = `
+            <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                <thead>
+                    <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
+                        <th style="padding: 6px;">Train</th>
+                        <th style="padding: 6px;">Origin</th>
+                        <th style="padding: 6px;">Destination</th>
+                        <th style="padding: 6px;">Departure ➔ Arrival</th>
+                        <th style="padding: 6px;">Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rowsHTML}
+                </tbody>
+            </table>
+        `;
+    } catch (e) {
+        resultsContainer.innerHTML = `<p style="color: #ef4444; padding: 10px;">Failed to fetch route plans: ${e.message}</p>`;
+    }
+}
+
 async function loadStations() {
     try {
         const resp = await fetch('/api/stations');
@@ -322,10 +547,19 @@ async function loadSegments() {
 }
 
 function renderStations() {
+    const fromSelect = document.getElementById('route-from-select');
+    const toSelect = document.getElementById('route-to-select');
+
+    if (fromSelect && toSelect) {
+        fromSelect.innerHTML = '<option value="">Select origin station...</option>';
+        toSelect.innerHTML = '<option value="">Select destination station...</option>';
+    }
+
     stationsData.forEach(st => {
         const icon = L.divIcon({
             className: 'station-marker',
-            iconSize: [10, 10]
+            iconSize: [16, 16],
+            iconAnchor: [8, 8]
         });
 
         const marker = L.marker([st.lat, st.lon], { icon: icon }).addTo(map);
@@ -336,6 +570,18 @@ function renderStations() {
         });
 
         stationMarkersMap[st.stop_id] = marker;
+
+        if (fromSelect && toSelect) {
+            const opt1 = document.createElement('option');
+            opt1.value = st.stop_id;
+            opt1.textContent = st.stop_name;
+            fromSelect.appendChild(opt1);
+
+            const opt2 = document.createElement('option');
+            opt2.value = st.stop_id;
+            opt2.textContent = st.stop_name;
+            toSelect.appendChild(opt2);
+        }
     });
 }
 
@@ -431,12 +677,13 @@ async function openStationTimetable(station) {
         const resp = await fetch(`/api/stations/${station.stop_id}/timetable`);
         const entries = await resp.json();
 
-        let timetableHTML = `<div style="max-height: 250px; overflow-y: auto;">
+        let timetableHTML = `<div style="max-height: 280px; overflow-y: auto; width: 340px;">
             <h3 style="margin-bottom: 8px; color: #00e5ff;">🚉 ${station.stop_name}</h3>
             <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
                 <thead>
                     <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
                         <th style="padding: 4px;">Train</th>
+                        <th style="padding: 4px;">Destination</th>
                         <th style="padding: 4px;">Arr / Dep</th>
                         <th style="padding: 4px;">Status</th>
                     </tr>
@@ -444,13 +691,15 @@ async function openStationTimetable(station) {
                 <tbody>`;
 
         if (entries.length === 0) {
-            timetableHTML += `<tr><td colspan="3" style="padding: 8px; text-align: center; color: #a0aec0;">No scheduled trains found.</td></tr>`;
+            timetableHTML += `<tr><td colspan="4" style="padding: 8px; text-align: center; color: #a0aec0;">No scheduled trains found.</td></tr>`;
         } else {
             entries.forEach(e => {
                 const delayVal = typeof e.delay_minutes === 'number' ? e.delay_minutes : 0;
                 const delayStr = delayVal > 0 ? `<span style="color: #ef4444;">+${delayVal}m</span>` : `<span style="color: #10b981;">On Time</span>`;
-                timetableHTML += `<tr style="border-bottom: 1px solid #2a313d;">
-                    <td style="padding: 6px 4px;"><strong>${e.train_number}</strong></td>
+                const dest = e.destination_station_name || e.headsign || 'N/A';
+                timetableHTML += `<tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="timetable-row" data-train="${e.train_number}">
+                    <td style="padding: 6px 4px;"><strong>Train ${e.train_number}</strong></td>
+                    <td style="padding: 6px 4px; color: #e2e8f0; font-weight: 500;">🏁 ${dest}</td>
                     <td style="padding: 6px 4px;">${e.arrival_time} / ${e.departure_time}</td>
                     <td style="padding: 6px 4px;">${delayStr}</td>
                 </tr>`;
