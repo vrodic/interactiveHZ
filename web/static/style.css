@@ -256,25 +256,46 @@ body, html {
     background: #0052a3;
 }
 
-.train-marker {
-    width: 32px;
-    height: 32px;
-    background: #0066cc;
-    border: 2px solid #ffffff;
-    border-radius: 50%;
-    box-shadow: 0 0 10px rgba(0,102,204,0.8);
+.train-marker-container {
+    width: 44px;
+    height: 44px;
     cursor: pointer;
+    background: transparent;
+    border: none;
+}
+
+.train-marker-inner {
+    position: relative;
+    width: 44px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: white;
-    font-size: 14px;
-    font-weight: bold;
 }
 
-.train-marker.delayed {
-    background: #dc2626;
-    box-shadow: 0 0 10px rgba(220,38,38,0.8);
+.train-svg {
+    transition: transform 0.3s ease-out;
+    filter: drop-shadow(0 3px 6px rgba(0,0,0,0.6));
+}
+
+.train-number-badge {
+    position: absolute;
+    bottom: -2px;
+    background: #0f172a;
+    color: #38bdf8;
+    border: 1px solid #0284c7;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 8px;
+    white-space: nowrap;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.7);
+    pointer-events: none;
+}
+
+.train-marker-container.delayed .train-number-badge {
+    color: #fca5a5;
+    border-color: #ef4444;
 }
 
 .station-marker {

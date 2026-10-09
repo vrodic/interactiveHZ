@@ -208,10 +208,17 @@ function haversineKm(lat1, lon1, lat2, lon2) {
     return Math.sqrt(dx * dx + dy * dy);
 }
 
-function getPointOnPath(path, progress) {
-    if (!path || path.length === 0) return null;
-    if (path.length === 1 || progress <= 0) return [path[0].lat, path[0].lon];
-    if (progress >= 1) return [path[path.length - 1].lat, path[path.length - 1].lon];
+function calculateBearing(lat1, lon1, lat2, lon2) {
+    const y = Math.sin((lon2 - lon1) * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180);
+    const x = Math.cos(lat1 * Math.PI / 180) * Math.sin(lat2 * Math.PI / 180) -
+              Math.sin(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.cos((lon2 - lon1) * Math.PI / 180);
+    const brng = Math.atan2(y, x) * 180 / Math.PI;
+    return (brng + 360) % 360;
+}
+
+function getPointAndBearingOnPath(path, progress) {
+    if (!path || path.length === 0) return { pos: null, bearing: 0 };
+    if (path.length === 1) return { pos: [path[0].lat, path[0].lon], bearing: 0 };
 
     let totalDist = 0;
     const segs = [];
@@ -221,7 +228,18 @@ function getPointOnPath(path, progress) {
         totalDist += d;
     }
 
-    if (totalDist === 0) return [path[0].lat, path[0].lon];
+    if (totalDist === 0) return { pos: [path[0].lat, path[0].lon], bearing: 0 };
+
+    if (progress <= 0) {
+        const bearing = calculateBearing(segs[0].p1.lat, segs[0].p1.lon, segs[0].p2.lat, segs[0].p2.lon);
+        return { pos: [path[0].lat, path[0].lon], bearing };
+    }
+
+    if (progress >= 1) {
+        const lastSeg = segs[segs.length - 1];
+        const bearing = calculateBearing(lastSeg.p1.lat, lastSeg.p1.lon, lastSeg.p2.lat, lastSeg.p2.lon);
+        return { pos: [path[path.length - 1].lat, path[path.length - 1].lon], bearing };
+    }
 
     const targetDist = progress * totalDist;
     let accum = 0;
@@ -231,12 +249,15 @@ function getPointOnPath(path, progress) {
             const segProgress = (targetDist - accum) / seg.len;
             const lat = seg.p1.lat + (seg.p2.lat - seg.p1.lat) * segProgress;
             const lon = seg.p1.lon + (seg.p2.lon - seg.p1.lon) * segProgress;
-            return [lat, lon];
+            const bearing = calculateBearing(seg.p1.lat, seg.p1.lon, seg.p2.lat, seg.p2.lon);
+            return { pos: [lat, lon], bearing };
         }
         accum += seg.len;
     }
 
-    return [path[path.length - 1].lat, path[path.length - 1].lon];
+    const lastSeg = segs[segs.length - 1];
+    const bearing = calculateBearing(lastSeg.p1.lat, lastSeg.p1.lon, lastSeg.p2.lat, lastSeg.p2.lon);
+    return { pos: [path[path.length - 1].lat, path[path.length - 1].lon], bearing };
 }
 
 function startUpdateLoop() {
@@ -272,6 +293,30 @@ function startUpdateLoop() {
     requestAnimationFrame(animate);
 }
 
+function getTrainSVGHTML(trainNumber, isDelayed, bearing) {
+    const color = isDelayed ? '#ef4444' : '#0066cc';
+    const strokeColor = isDelayed ? '#7f1d1d' : '#002966';
+    return `
+        <div class="train-marker-inner">
+            <svg class="train-svg" style="transform: rotate(${Math.round(bearing)}deg);" width="38" height="38" viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <!-- Drop shadow aura -->
+                <circle cx="19" cy="19" r="17" fill="${color}" fill-opacity="0.25" />
+                <!-- Streamlined Train Body Pointing UP -->
+                <path d="M19 2.5 C14.5 8, 11.5 13, 11.5 22 C11.5 28.5, 13.5 32.5, 19 32.5 C24.5 32.5, 26.5 28.5, 26.5 22 C26.5 13, 23.5 8, 19 2.5 Z"
+                      fill="${color}" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>
+                <!-- Driver Cab Windshield -->
+                <path d="M15 11.5 C17 10, 21 10, 23 11.5 L22 15.5 C20 14.8, 18 14.8, 16 15.5 Z"
+                      fill="#e0f2fe" stroke="${strokeColor}" stroke-width="0.8"/>
+                <!-- Bright Front Headlight -->
+                <circle cx="19" cy="6" r="2.2" fill="#facc15" stroke="#ffffff" stroke-width="0.6"/>
+                <!-- Roof Stripe Detail -->
+                <line x1="19" y1="17" x2="19" y2="29" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" opacity="0.8"/>
+            </svg>
+            <div class="train-number-badge">${trainNumber}</div>
+        </div>
+    `;
+}
+
 function updateTrainMarkersClientSide() {
     const currentTrainIds = new Set();
 
@@ -291,24 +336,39 @@ function updateTrainMarkersClientSide() {
         }
 
         let pos = [train.lat, train.lon];
+        let bearing = 0;
+
         if (train.path && train.path.length > 0) {
-            const calculatedPos = getPointOnPath(train.path, progress);
-            if (calculatedPos) pos = calculatedPos;
+            const pb = getPointAndBearingOnPath(train.path, progress);
+            if (pb.pos) {
+                pos = pb.pos;
+                bearing = pb.bearing;
+            }
         }
 
+        const isDelayed = train.delay_minutes > 0;
+
         if (trainMarkersMap[train.trip_id]) {
-            trainMarkersMap[train.trip_id].setLatLng(pos);
-            if (train.delay_minutes > 0) {
-                trainMarkersMap[train.trip_id].getElement()?.classList.add('delayed');
-            } else {
-                trainMarkersMap[train.trip_id].getElement()?.classList.remove('delayed');
+            const marker = trainMarkersMap[train.trip_id];
+            marker.setLatLng(pos);
+            const el = marker.getElement();
+            if (el) {
+                const svgEl = el.querySelector('.train-svg');
+                if (svgEl) {
+                    svgEl.style.transform = `rotate(${Math.round(bearing)}deg)`;
+                }
+                if (isDelayed) {
+                    el.classList.add('delayed');
+                } else {
+                    el.classList.remove('delayed');
+                }
             }
         } else {
             const icon = L.divIcon({
-                className: `train-marker ${train.delay_minutes > 0 ? 'delayed' : ''}`,
-                html: '🚆',
-                iconSize: [32, 32],
-                iconAnchor: [16, 16]
+                className: `train-marker-container ${isDelayed ? 'delayed' : ''}`,
+                html: getTrainSVGHTML(train.train_number, isDelayed, bearing),
+                iconSize: [44, 44],
+                iconAnchor: [22, 22]
             });
 
             const marker = L.marker(pos, { icon: icon }).addTo(map);
