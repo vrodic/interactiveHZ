@@ -451,7 +451,6 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 					DelayMinutes:    delayMinutes,
 					ScheduledDepSec: s1DepSec,
 					ScheduledArrSec: s2ArrSec,
-					Path:            pathWaypoints,
 				}
 			}
 		}
@@ -567,7 +566,7 @@ func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon,
 		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon,
-		       COALESCE(t.trip_short_name, t.trip_id), t.trip_id, COALESCE(t.trip_headsign, ''),
+		       COALESCE(t.trip_short_name, t.trip_id),
 		       st1.departure_seconds, st2.arrival_seconds
 		FROM stop_times st1
 		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
@@ -588,19 +587,26 @@ func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
 		toID   string
 	}
 
-	segmentMap := make(map[segmentKey]*SegmentSpeed)
+	type segAgg struct {
+		seg           *SegmentSpeed
+		trainNums     map[string]bool
+		speedKmhSum   float64
+		speedKmhCount int
+	}
+
+	segmentMap := make(map[segmentKey]*segAgg)
 
 	for rows.Next() {
 		var (
-			fromID, fromName                string
-			fromLat, fromLon                float64
-			toID, toName                    string
-			toLat, toLon                    float64
-			trainNum, tripID, headsign      string
-			depSec, arrSec                  int
+			fromID, fromName string
+			fromLat, fromLon float64
+			toID, toName     string
+			toLat, toLon     float64
+			trainNum         string
+			depSec, arrSec   int
 		)
 
-		if err := rows.Scan(&fromID, &fromName, &fromLat, &fromLon, &toID, &toName, &toLat, &toLon, &trainNum, &tripID, &headsign, &depSec, &arrSec); err != nil {
+		if err := rows.Scan(&fromID, &fromName, &fromLat, &fromLon, &toID, &toName, &toLat, &toLon, &trainNum, &depSec, &arrSec); err != nil {
 			continue
 		}
 
@@ -618,28 +624,135 @@ func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
 		speedKmh := distKm / (durationMins / 60.0)
 
 		key := segmentKey{fromID: fromID, toID: toID}
-		seg, exists := segmentMap[key]
+		agg, exists := segmentMap[key]
 		if !exists {
 			segID := fromID + "->" + toID
 			segPath := s.getRouteWaypoints(fromID, toID, fromLat, fromLon, toLat, toLon)
+			agg = &segAgg{
+				seg: &SegmentSpeed{
+					ID:           segID,
+					FromStopID:   fromID,
+					FromStopName: fromName,
+					FromLat:      fromLat,
+					FromLon:      fromLon,
+					ToStopID:     toID,
+					ToStopName:   toName,
+					ToLat:        toLat,
+					ToLon:        toLon,
+					DistanceKm:   distKm,
+					Path:         segPath,
+				},
+				trainNums: make(map[string]bool),
+			}
+			segmentMap[key] = agg
+		}
+
+		if !agg.trainNums[trainNum] {
+			agg.trainNums[trainNum] = true
+			agg.speedKmhSum += speedKmh
+			agg.speedKmhCount++
+		}
+	}
+
+	segments := make([]SegmentSpeed, 0, len(segmentMap))
+	for _, agg := range segmentMap {
+		agg.seg.TrainCount = len(agg.trainNums)
+		if agg.speedKmhCount > 0 {
+			agg.seg.AvgSpeedKmh = agg.speedKmhSum / float64(agg.speedKmhCount)
+		}
+		segments = append(segments, *agg.seg)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(segments)
+}
+
+func (s *Server) GetSegmentDetails(w http.ResponseWriter, r *http.Request) {
+	fromID := r.URL.Query().Get("from")
+	toID := r.URL.Query().Get("to")
+
+	if fromID == "" || toID == "" {
+		segID := r.URL.Query().Get("id")
+		parts := strings.Split(segID, "->")
+		if len(parts) == 2 {
+			fromID = parts[0]
+			toID = parts[1]
+		}
+	}
+
+	if fromID == "" || toID == "" {
+		http.Error(w, "Parameters 'from' and 'to' (or 'id') are required", http.StatusBadRequest)
+		return
+	}
+
+	query := `
+		SELECT st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon,
+		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon,
+		       COALESCE(t.trip_short_name, t.trip_id), t.trip_id, COALESCE(t.trip_headsign, ''),
+		       st1.departure_seconds, st2.arrival_seconds
+		FROM stop_times st1
+		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
+		JOIN stations s1 ON st1.stop_id = s1.stop_id
+		JOIN stations s2 ON st2.stop_id = s2.stop_id
+		JOIN trips t ON st1.trip_id = t.trip_id
+		WHERE st1.stop_id = ? AND st2.stop_id = ?
+	`
+
+	rows, err := s.db.Query(query, fromID, toID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var seg *SegmentSpeed
+
+	for rows.Next() {
+		var (
+			fID, fName                 string
+			fLat, fLon                 float64
+			tID, tName                 string
+			tLat, tLon                 float64
+			trainNum, tripID, headsign string
+			depSec, arrSec             int
+		)
+
+		if err := rows.Scan(&fID, &fName, &fLat, &fLon, &tID, &tName, &tLat, &tLon, &trainNum, &tripID, &headsign, &depSec, &arrSec); err != nil {
+			continue
+		}
+
+		durationSec := arrSec - depSec
+		if durationSec <= 0 {
+			continue
+		}
+
+		distKm := haversineKm(fLat, fLon, tLat, tLon)
+		if distKm < 0.1 {
+			continue
+		}
+
+		durationMins := float64(durationSec) / 60.0
+		speedKmh := distKm / (durationMins / 60.0)
+
+		if seg == nil {
+			segID := fID + "->" + tID
+			segPath := s.getRouteWaypoints(fID, tID, fLat, fLon, tLat, tLon)
 			seg = &SegmentSpeed{
 				ID:           segID,
-				FromStopID:   fromID,
-				FromStopName: fromName,
-				FromLat:      fromLat,
-				FromLon:      fromLon,
-				ToStopID:     toID,
-				ToStopName:   toName,
-				ToLat:        toLat,
-				ToLon:        toLon,
+				FromStopID:   fID,
+				FromStopName: fName,
+				FromLat:      fLat,
+				FromLon:      fLon,
+				ToStopID:     tID,
+				ToStopName:   tName,
+				ToLat:        tLat,
+				ToLon:        tLon,
 				DistanceKm:   distKm,
 				Path:         segPath,
 				Trains:       make([]TrainSegmentSpeed, 0),
 			}
-			segmentMap[key] = seg
 		}
 
-		// Deduplicate train entries for the segment by train number
 		isDup := false
 		for _, tr := range seg.Trains {
 			if tr.TrainNumber == trainNum {
@@ -661,21 +774,22 @@ func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	segments := make([]SegmentSpeed, 0, len(segmentMap))
-	for _, seg := range segmentMap {
-		seg.TrainCount = len(seg.Trains)
-		totalSpeed := 0.0
-		for _, tr := range seg.Trains {
-			totalSpeed += tr.SpeedKmh
-		}
-		if seg.TrainCount > 0 {
-			seg.AvgSpeedKmh = totalSpeed / float64(seg.TrainCount)
-		}
-		segments = append(segments, *seg)
+	if seg == nil {
+		http.Error(w, "Segment not found", http.StatusNotFound)
+		return
+	}
+
+	seg.TrainCount = len(seg.Trains)
+	totalSpeed := 0.0
+	for _, tr := range seg.Trains {
+		totalSpeed += tr.SpeedKmh
+	}
+	if seg.TrainCount > 0 {
+		seg.AvgSpeedKmh = totalSpeed / float64(seg.TrainCount)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(segments)
+	json.NewEncoder(w).Encode(seg)
 }
 
 func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, error) {

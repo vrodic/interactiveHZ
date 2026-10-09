@@ -198,6 +198,54 @@ func TestGetDashboardStats(t *testing.T) {
 	}
 }
 
+func TestGetSegmentsAndDetails(t *testing.T) {
+	srv := setupTestDB(t)
+
+	// 1. Test GET /api/segments
+	req := httptest.NewRequest("GET", "/api/segments", nil)
+	w := httptest.NewRecorder()
+	srv.GetSegments(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK for GetSegments, got %d", res.StatusCode)
+	}
+
+	var segments []SegmentSpeed
+	if err := json.NewDecoder(res.Body).Decode(&segments); err != nil {
+		t.Fatalf("Failed to decode segments response: %v", err)
+	}
+
+	if len(segments) != 1 {
+		t.Fatalf("Expected 1 segment, got %d", len(segments))
+	}
+	if len(segments[0].Trains) != 0 {
+		t.Errorf("Expected bulk /api/segments to omit embedded trains array, got %d trains", len(segments[0].Trains))
+	}
+
+	// 2. Test GET /api/segments/details
+	reqDetail := httptest.NewRequest("GET", "/api/segments/details?from=s1&to=s2", nil)
+	wDetail := httptest.NewRecorder()
+	srv.GetSegmentDetails(wDetail, reqDetail)
+
+	resDetail := wDetail.Result()
+	if resDetail.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK for GetSegmentDetails, got %d", resDetail.StatusCode)
+	}
+
+	var detail SegmentSpeed
+	if err := json.NewDecoder(resDetail.Body).Decode(&detail); err != nil {
+		t.Fatalf("Failed to decode segment details response: %v", err)
+	}
+
+	if len(detail.Trains) != 1 {
+		t.Fatalf("Expected 1 train in segment detail, got %d", len(detail.Trains))
+	}
+	if detail.Trains[0].TrainNumber != "2010" {
+		t.Errorf("Expected train number 2010 in segment detail, got %s", detail.Trains[0].TrainNumber)
+	}
+}
+
 func BenchmarkGetActiveTrains(b *testing.B) {
 	t := &testing.T{}
 	srv := setupTestDB(t)

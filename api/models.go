@@ -104,7 +104,7 @@ type SegmentSpeed struct {
 	AvgSpeedKmh  float64             `json:"avg_speed_kmh"`
 	TrainCount   int                 `json:"train_count"`
 	Path         []LatLon            `json:"path,omitempty"`
-	Trains       []TrainSegmentSpeed `json:"trains"`
+	Trains       []TrainSegmentSpeed `json:"trains,omitempty"`
 }
 
 type DelayAPIResponse struct {

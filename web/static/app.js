@@ -1006,52 +1006,70 @@ function renderSegments() {
     updateSegmentVisibility();
 }
 
-function openSegmentDetails(seg) {
-    let trainRowsHTML = '';
-    if (seg.trains && seg.trains.length > 0) {
-        seg.trains.forEach(tr => {
-            const depTime = formatSecondsToTime(tr.scheduled_dep_sec);
-            const arrTime = formatSecondsToTime(tr.scheduled_arr_sec);
-            trainRowsHTML += `
-                <tr style="border-bottom: 1px solid #2a313d;">
-                    <td style="padding: 6px 4px;"><strong>Train ${tr.train_number}</strong></td>
-                    <td style="padding: 6px 4px;">${depTime} - ${arrTime}</td>
-                    <td style="padding: 6px 4px; color: #10b981; font-weight: bold;">${Math.round(tr.speed_kmh)} km/h</td>
-                </tr>
-            `;
-        });
-    } else {
-        trainRowsHTML = `<tr><td colspan="3" style="padding: 8px; text-align: center; color: #a0aec0;">No train data for segment.</td></tr>`;
-    }
-
-    const popupHTML = `
-        <div style="max-height: 280px; overflow-y: auto; width: 300px;">
-            <h3 style="margin-bottom: 4px; color: #3b82f6;">📍 ${seg.from_stop_name} ➔ ${seg.to_stop_name}</h3>
-            <div style="font-size: 12px; color: #a0aec0; margin-bottom: 10px;">
-                Distance: <strong>${seg.distance_km.toFixed(1)} km</strong> | Avg Speed: <strong style="color: #10b981;">${Math.round(seg.avg_speed_kmh)} km/h</strong> (${seg.train_count} trains)
-            </div>
-            <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
-                <thead>
-                    <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
-                        <th style="padding: 4px;">Train</th>
-                        <th style="padding: 4px;">Dep - Arr</th>
-                        <th style="padding: 4px;">Speed</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${trainRowsHTML}
-                </tbody>
-            </table>
-        </div>
-    `;
-
+async function openSegmentDetails(seg) {
     const midLat = (seg.from_lat + seg.to_lat) / 2;
     const midLon = (seg.from_lon + seg.to_lon) / 2;
 
-    L.popup()
+    const popup = L.popup()
         .setLatLng([midLat, midLon])
-        .setContent(popupHTML)
+        .setContent(`
+            <div style="width: 300px; padding: 10px;">
+                <h3 style="margin-bottom: 4px; color: #3b82f6;">📍 ${seg.from_stop_name} ➔ ${seg.to_stop_name}</h3>
+                <p style="color: #a0aec0; font-size: 12px;"><em>Loading scheduled train details...</em></p>
+            </div>
+        `)
         .openOn(map);
+
+    try {
+        const resp = await fetch(`/api/segments/details?from=${seg.from_stop_id}&to=${seg.to_stop_id}`);
+        const details = await resp.json();
+
+        let trainRowsHTML = '';
+        if (details.trains && details.trains.length > 0) {
+            details.trains.forEach(tr => {
+                const depTime = formatSecondsToTime(tr.scheduled_dep_sec);
+                const arrTime = formatSecondsToTime(tr.scheduled_arr_sec);
+                trainRowsHTML += `
+                    <tr style="border-bottom: 1px solid #2a313d;">
+                        <td style="padding: 6px 4px;"><strong>Train ${tr.train_number}</strong></td>
+                        <td style="padding: 6px 4px;">${depTime} - ${arrTime}</td>
+                        <td style="padding: 6px 4px; color: #10b981; font-weight: bold;">${Math.round(tr.speed_kmh)} km/h</td>
+                    </tr>
+                `;
+            });
+        } else {
+            trainRowsHTML = `<tr><td colspan="3" style="padding: 8px; text-align: center; color: #a0aec0;">No train data for segment.</td></tr>`;
+        }
+
+        const popupHTML = `
+            <div style="max-height: 280px; overflow-y: auto; width: 300px;">
+                <h3 style="margin-bottom: 4px; color: #3b82f6;">📍 ${seg.from_stop_name} ➔ ${seg.to_stop_name}</h3>
+                <div style="font-size: 12px; color: #a0aec0; margin-bottom: 10px;">
+                    Distance: <strong>${seg.distance_km.toFixed(1)} km</strong> | Avg Speed: <strong style="color: #10b981;">${Math.round(seg.avg_speed_kmh)} km/h</strong> (${seg.train_count} trains)
+                </div>
+                <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
+                            <th style="padding: 4px;">Train</th>
+                            <th style="padding: 4px;">Dep - Arr</th>
+                            <th style="padding: 4px;">Speed</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${trainRowsHTML}
+                    </tbody>
+                </table>
+            </div>
+        `;
+
+        popup.setContent(popupHTML);
+    } catch (e) {
+        popup.setContent(`
+            <div style="width: 300px; padding: 10px; color: #ef4444;">
+                Failed to load segment details: ${e.message}
+            </div>
+        `);
+    }
 }
 
 async function openStationTimetable(station) {
