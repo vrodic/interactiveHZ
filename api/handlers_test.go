@@ -257,3 +257,15 @@ func BenchmarkGetActiveTrains(b *testing.B) {
 		srv.GetActiveTrains(w, req)
 	}
 }
+
+func BenchmarkGetSegments(b *testing.B) {
+	t := &testing.T{}
+	srv := setupTestDB(t)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest("GET", "/api/segments", nil)
+		w := httptest.NewRecorder()
+		srv.GetSegments(w, req)
+	}
+}
