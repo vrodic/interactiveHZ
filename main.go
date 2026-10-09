@@ -32,6 +32,8 @@ func main() {
 	}
 	defer database.Close()
 
+	server := api.NewServer(database)
+
 	go func() {
 		localCacheDir := filepath.Dir(dbPath)
 		gtfsURL := ingest.DefaultGTFSURL
@@ -39,6 +41,14 @@ func main() {
 		log.Println("Running initial GTFS data ingestion in background...")
 		if err := ingest.IngestGTFS(database, gtfsURL, localCacheDir); err != nil {
 			log.Printf("Initial GTFS ingestion warning: %v", err)
+		}
+
+		if osmWays, err := ingest.FetchAndCacheOSMRailways(database, localCacheDir); err == nil && len(osmWays) > 0 {
+			graph := api.BuildOSMGraph(osmWays)
+			server.SetOSMGraph(graph)
+			log.Printf("OSM railway graph built with %d track segments.", len(osmWays))
+		} else {
+			log.Printf("OSM railway ingestion warning: %v", err)
 		}
 
 		ticker := time.NewTicker(24 * time.Hour)
@@ -49,8 +59,6 @@ func main() {
 			}
 		}
 	}()
-
-	server := api.NewServer(database)
 	server.StartBackgroundDelayWorker()
 
 	mux := http.NewServeMux()

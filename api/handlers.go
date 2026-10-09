@@ -54,6 +54,7 @@ func (b *Broadcaster) Broadcast(msg string) {
 
 type Server struct {
 	db          *sql.DB
+	osmGraph    *OSMGraph
 	delayCache  sync.Map
 	routeCache  sync.Map
 	broadcaster *Broadcaster
@@ -66,10 +67,22 @@ func NewServer(db *sql.DB) *Server {
 	}
 }
 
+func (s *Server) SetOSMGraph(graph *OSMGraph) {
+	s.osmGraph = graph
+}
+
 func (s *Server) getRouteWaypoints(fromID, toID string, s1Lat, s1Lon, s2Lat, s2Lon float64) []LatLon {
 	key := fromID + "->" + toID
 	if val, ok := s.routeCache.Load(key); ok {
 		return val.([]LatLon)
+	}
+
+	// 1. Try OSM railway graph pathfinding
+	if s.osmGraph != nil {
+		if osmPath := s.osmGraph.FindShortestPath(s1Lat, s1Lon, s2Lat, s2Lon); len(osmPath) >= 2 {
+			s.routeCache.Store(key, osmPath)
+			return osmPath
+		}
 	}
 
 	querySelect := `
@@ -267,6 +280,13 @@ func (s *Server) GetStations(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(stations)
 }
 
+func getCalendarCondition(t time.Time) (string, []interface{}) {
+	dateStr := t.Format("20060102")
+	weekday := strings.ToLower(t.Weekday().String())
+	cond := fmt.Sprintf(`(c.service_id IS NULL OR (c.start_date <= ? AND c.end_date >= ? AND c.%s = 1))`, weekday)
+	return cond, []interface{}{dateStr, dateStr}
+}
+
 func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 	stopID := strings.TrimPrefix(r.URL.Path, "/api/stations/")
 	stopID = strings.TrimSuffix(stopID, "/timetable")
@@ -276,23 +296,27 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := `
+	calCond, calArgs := getCalendarCondition(time.Now())
+
+	query := fmt.Sprintf(`
 		SELECT MIN(st.trip_id), COALESCE(t.trip_short_name, t.trip_id) AS train_num, COALESCE(t.trip_headsign, ''),
 		       COALESCE(last_s.stop_name, COALESCE(t.trip_headsign, '')),
 		       st.arrival_time, st.departure_time, MIN(st.stop_sequence)
 		FROM stop_times st
 		JOIN trips t ON st.trip_id = t.trip_id
+		LEFT JOIN calendar c ON t.service_id = c.service_id
 		LEFT JOIN stop_times st_last ON st_last.trip_id = t.trip_id AND st_last.stop_sequence = (
 			SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id
 		)
 		LEFT JOIN stations last_s ON st_last.stop_id = last_s.stop_id
-		WHERE st.stop_id = ?
+		WHERE st.stop_id = ? AND %s
 		GROUP BY train_num, st.departure_time, st.arrival_time
 		ORDER BY st.departure_seconds ASC
 		LIMIT 100
-	`
+	`, calCond)
 
-	rows, err := s.db.Query(query, stopID)
+	args := append([]interface{}{stopID}, calArgs...)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -358,7 +382,9 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 	windowStart := secondsOfDay - 10800
 	windowEnd := secondsOfDay + 1800
 
-	query := `
+	calCond, calArgs := getCalendarCondition(now)
+
+	query := fmt.Sprintf(`
 		SELECT t.trip_id, COALESCE(t.trip_short_name, t.trip_id), COALESCE(t.trip_headsign, ''),
 		       st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon, st1.departure_seconds,
 		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon, st2.arrival_seconds,
@@ -368,16 +394,18 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 		JOIN stations s1 ON st1.stop_id = s1.stop_id
 		JOIN stations s2 ON st2.stop_id = s2.stop_id
 		JOIN trips t ON st1.trip_id = t.trip_id
+		LEFT JOIN calendar c ON t.service_id = c.service_id
 		LEFT JOIN stop_times st_first ON st_first.trip_id = t.trip_id AND st_first.stop_sequence = 1
 		LEFT JOIN stations first_s ON st_first.stop_id = first_s.stop_id
 		LEFT JOIN stop_times st_last ON st_last.trip_id = t.trip_id AND st_last.stop_sequence = (
 			SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id
 		)
 		LEFT JOIN stations last_s ON st_last.stop_id = last_s.stop_id
-		WHERE st1.departure_seconds <= ? AND st2.arrival_seconds >= ?
-	`
+		WHERE st1.departure_seconds <= ? AND st2.arrival_seconds >= ? AND %s
+	`, calCond)
 
-	rows, err := s.db.Query(query, windowEnd, windowStart)
+	args := append([]interface{}{windowEnd, windowStart}, calArgs...)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -843,7 +871,9 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	query := `
+	calCond, calArgs := getCalendarCondition(time.Now())
+
+	query := fmt.Sprintf(`
 		SELECT MIN(st1.trip_id), COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
 		       s1.stop_name as origin_name, s2.stop_name as dest_name,
 		       st1.departure_time, st2.arrival_time, st1.departure_seconds,
@@ -853,16 +883,19 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 		JOIN stations s1 ON st1.stop_id = s1.stop_id
 		JOIN stations s2 ON st2.stop_id = s2.stop_id
 		JOIN trips t ON st1.trip_id = t.trip_id
+		LEFT JOIN calendar c ON t.service_id = c.service_id
 		WHERE (st1.stop_id = ? OR s1.stop_name LIKE ?)
 		  AND (st2.stop_id = ? OR s2.stop_name LIKE ?)
+		  AND %s
 		GROUP BY train_num, st1.departure_seconds, st2.arrival_seconds
 		ORDER BY st1.departure_seconds ASC
-	`
+	`, calCond)
 
 	likeFrom := "%" + from + "%"
 	likeTo := "%" + to + "%"
 
-	rows, err := s.db.Query(query, from, likeFrom, to, likeTo)
+	args := append([]interface{}{from, likeFrom, to, likeTo}, calArgs...)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
