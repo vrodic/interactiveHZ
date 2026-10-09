@@ -426,24 +426,27 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 			pathWaypoints := s.getRouteWaypoints(s1ID, s2ID, s1Lat, s1Lon, s2Lat, s2Lon)
 			curLat, curLon := interpolateAlongPath(pathWaypoints, progress)
 
-			activeTrainsMap[tripID] = ActiveTrain{
-				TripID:           tripID,
-				TrainNumber:      trainNum,
-				Headsign:         headsign,
-				CurrentLat:       curLat,
-				CurrentLon:       curLon,
-				FirstStationName: firstStName,
-				LastStationName:  lastStName,
-				PrevStationID:    s1ID,
-				PrevStationName:  s1Name,
-				NextStationID:    s2ID,
-				NextStationName:  s2Name,
-				Progress:         progress,
-				Status:           status,
-				DelayMinutes:     delayMinutes,
-				ScheduledDepSec:  s1DepSec,
-				ScheduledArrSec:  s2ArrSec,
-				Path:             pathWaypoints,
+			// Index by trainNum to deduplicate active trains by train number
+			if existing, ok := activeTrainsMap[trainNum]; !ok || (progress > 0 && progress < 1 && (existing.Progress <= 0 || existing.Progress >= 1)) {
+				activeTrainsMap[trainNum] = ActiveTrain{
+					TripID:           tripID,
+					TrainNumber:      trainNum,
+					Headsign:         headsign,
+					CurrentLat:       curLat,
+					CurrentLon:       curLon,
+					FirstStationName: firstStName,
+					LastStationName:  lastStName,
+					PrevStationID:    s1ID,
+					PrevStationName:  s1Name,
+					NextStationID:    s2ID,
+					NextStationName:  s2Name,
+					Progress:         progress,
+					Status:           status,
+					DelayMinutes:     delayMinutes,
+					ScheduledDepSec:  s1DepSec,
+					ScheduledArrSec:  s2ArrSec,
+					Path:             pathWaypoints,
+				}
 			}
 		}
 	}
@@ -769,6 +772,14 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 	if tsStr := r.URL.Query().Get("time"); tsStr != "" {
 		if sec, err := strconv.Atoi(tsStr); err == nil {
 			nowSec = sec
+		} else if parts := strings.Split(tsStr, ":"); len(parts) >= 2 {
+			h, _ := strconv.Atoi(parts[0])
+			m, _ := strconv.Atoi(parts[1])
+			sec := 0
+			if len(parts) >= 3 {
+				sec, _ = strconv.Atoi(parts[2])
+			}
+			nowSec = h*3600 + m*60 + sec
 		}
 	}
 

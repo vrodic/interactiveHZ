@@ -1,5 +1,6 @@
 # Binaries and build artifacts
 server
+hz-train-map
 
 # Database and runtime data files
 data/

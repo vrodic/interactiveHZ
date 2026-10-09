@@ -446,10 +446,18 @@ function openActiveTrainsModal() {
     const body = document.getElementById('active-trains-modal-body');
 
     let rowsHTML = '';
-    if (activeTrainsData.length === 0) {
+    // Deduplicate active trains by train_number in modal
+    const seenTrainNums = new Set();
+    const uniqueTrains = activeTrainsData.filter(tr => {
+        if (seenTrainNums.has(tr.train_number)) return false;
+        seenTrainNums.add(tr.train_number);
+        return true;
+    });
+
+    if (uniqueTrains.length === 0) {
         rowsHTML = `<tr><td colspan="5" style="padding: 16px; text-align: center; color: #a0aec0;">No active trains at current time.</td></tr>`;
     } else {
-        activeTrainsData.forEach(tr => {
+        uniqueTrains.forEach(tr => {
             const delayStr = tr.delay_minutes > 0
                 ? `<span style="color: #ef4444; font-weight: bold;">+${tr.delay_minutes} min delay</span>`
                 : `<span style="color: #10b981; font-weight: bold;">On Time</span>`;
@@ -511,7 +519,14 @@ async function openDashboardModal() {
 
         let delayedRows = '';
         if (stats.recent_delayed_trains && stats.recent_delayed_trains.length > 0) {
-            stats.recent_delayed_trains.forEach(tr => {
+            const seenDelayedNums = new Set();
+            const uniqueDelayed = stats.recent_delayed_trains.filter(tr => {
+                if (seenDelayedNums.has(tr.train_number)) return false;
+                seenDelayedNums.add(tr.train_number);
+                return true;
+            });
+
+            uniqueDelayed.forEach(tr => {
                 delayedRows += `
                     <tr style="border-bottom: 1px solid #2a313d;">
                         <td style="padding: 8px;"><strong>Train ${tr.train_number}</strong></td>
