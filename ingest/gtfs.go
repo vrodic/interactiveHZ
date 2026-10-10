@@ -3,6 +3,7 @@ package ingest
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
 	"fmt"
@@ -21,38 +22,44 @@ import (
 const DefaultGTFSURL = "https://www.hzpp.hr/GTFS_files.zip"
 
 func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
-	log.Println("Starting GTFS ingestion...")
+	log.Println("Starting GTFS ingestion check...")
 
 	var zipData []byte
-	var err error
 
 	cachedPath := ""
 	if localCacheDir != "" {
 		cachedPath = filepath.Join(localCacheDir, "GTFS_files.zip")
 	}
 
-	useCache := false
-	if cachedPath != "" {
-		if fi, err := os.Stat(cachedPath); err == nil {
-			if time.Since(fi.ModTime()) < 24*time.Hour {
+	if gtfsURL != "" {
+		log.Printf("Downloading GTFS data from %s...", gtfsURL)
+		downloadedData, errDownload := downloadGTFS(gtfsURL)
+		if errDownload == nil && len(downloadedData) > 0 {
+			downloadHash := fmt.Sprintf("%x", sha256.Sum256(downloadedData))
+
+			var cachedHash string
+			if cachedPath != "" {
+				if cachedData, errRead := os.ReadFile(cachedPath); errRead == nil && len(cachedData) > 0 {
+					cachedHash = fmt.Sprintf("%x", sha256.Sum256(cachedData))
+				}
+			}
+
+			if cachedHash != "" && downloadHash == cachedHash {
 				var count int
 				_ = sqlDB.QueryRow("SELECT COUNT(*) FROM stations").Scan(&count)
 				if count > 0 {
-					log.Printf("GTFS cache file %s is less than 24h old and DB is populated (%d stations). Skipping ingestion.", cachedPath, count)
+					log.Printf("Downloaded GTFS SHA-256 checksum (%s) matches cached file. Skipping disk write and DB re-ingestion.", downloadHash[:12])
 					return nil
 				}
 			}
-		}
-	}
 
-	if !useCache && gtfsURL != "" {
-		log.Printf("Downloading fresh GTFS data from %s...", gtfsURL)
-		zipData, err = downloadGTFS(gtfsURL)
-		if err != nil {
-			log.Printf("Failed to download GTFS from %s: %v. Checking local cache...", gtfsURL, err)
-		} else if localCacheDir != "" {
-			_ = os.MkdirAll(localCacheDir, 0755)
-			_ = os.WriteFile(cachedPath, zipData, 0644)
+			if localCacheDir != "" {
+				_ = os.MkdirAll(localCacheDir, 0755)
+				_ = os.WriteFile(cachedPath, downloadedData, 0644)
+			}
+			zipData = downloadedData
+		} else {
+			log.Printf("Failed to download GTFS from %s: %v. Checking local cache...", gtfsURL, errDownload)
 		}
 	}
 
