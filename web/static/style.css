@@ -326,6 +326,10 @@ body, html {
 }
 
 /* Selected Train Marker Highlight Effect */
+.train-marker-container.selected-train-marker {
+    z-index: 10000 !important;
+}
+
 .train-marker-container.selected-train-marker .train-svg-wrapper {
     position: relative;
 }
@@ -333,37 +337,40 @@ body, html {
 .train-marker-container.selected-train-marker .train-svg-wrapper::before {
     content: '';
     position: absolute;
-    top: -8px;
-    left: -8px;
-    right: -8px;
-    bottom: -8px;
-    border: 3px solid #00e5ff;
+    top: -12px;
+    left: -12px;
+    right: -12px;
+    bottom: -12px;
+    border: 4px solid #ffea00;
     border-radius: 50%;
-    animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+    background: rgba(255, 234, 0, 0.25);
+    box-shadow: 0 0 18px #ffea00, inset 0 0 10px #ffea00;
+    animation: pulse-ring-train 1.2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
     pointer-events: none;
 }
 
-@keyframes pulse-ring {
+@keyframes pulse-ring-train {
     0% {
-        transform: scale(0.7);
-        opacity: 0.9;
+        transform: scale(0.8);
+        opacity: 1;
     }
     50% {
-        transform: scale(1.3);
-        opacity: 0.4;
+        transform: scale(1.4);
+        opacity: 0.5;
     }
     100% {
-        transform: scale(0.7);
-        opacity: 0.9;
+        transform: scale(0.8);
+        opacity: 1;
     }
 }
 
 .train-marker-container.selected-train-marker .train-number-badge {
-    background: #00e5ff !important;
-    color: #0f1217 !important;
-    border-color: #ffffff !important;
-    font-weight: 800 !important;
-    box-shadow: 0 0 10px #00e5ff !important;
+    background: #ffea00 !important;
+    color: #000000 !important;
+    border: 2px solid #ffffff !important;
+    font-weight: 900 !important;
+    font-size: 12px !important;
+    box-shadow: 0 0 14px #ffea00, 0 2px 8px rgba(0,0,0,0.9) !important;
 }
 
 .station-marker {
@@ -380,6 +387,38 @@ body, html {
 .station-marker:hover {
     transform: scale(1.3);
     background: #f97316;
+}
+
+/* High Contrast Selected Station Highlight */
+.selected-station-marker {
+    width: 32px;
+    height: 32px;
+    pointer-events: none;
+}
+
+.selected-station-inner {
+    width: 32px;
+    height: 32px;
+    border: 4px solid #00e5ff;
+    border-radius: 50%;
+    background: rgba(0, 229, 255, 0.35);
+    box-shadow: 0 0 20px #00e5ff, inset 0 0 10px #00e5ff;
+    animation: pulse-ring-station 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-ring-station {
+    0% {
+        transform: scale(0.8);
+        opacity: 1;
+    }
+    50% {
+        transform: scale(1.3);
+        opacity: 0.6;
+    }
+    100% {
+        transform: scale(0.8);
+        opacity: 1;
+    }
 }
 
 /* Left Hand Navigation Strip / Sidebar */

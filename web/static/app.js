@@ -11,6 +11,9 @@ let segmentsLayerGroup = L.layerGroup();
 let segmentBadgesLayerGroup = L.layerGroup();
 let currentOpenedTrainNum = null;
 let selectedTrainNum = null;
+let selectedTrainRouteLayer = null;
+let selectedStationHighlightLayer = null;
+let selectedStationId = null;
 
 let currentTimeSec = getCurrentSecondsOfDay();
 let isRealtime = true;
@@ -291,8 +294,92 @@ function initControls() {
         document.getElementById('side-panel').style.display = 'none';
         currentOpenedTrainNum = null;
         selectedTrainNum = null;
+        clearSelectedTrainRoute();
         updateTrainMarkersClientSide();
     });
+}
+
+function clearSelectedStationHighlight() {
+    if (selectedStationHighlightLayer) {
+        map.removeLayer(selectedStationHighlightLayer);
+        selectedStationHighlightLayer = null;
+    }
+    selectedStationId = null;
+}
+
+function highlightSelectedStation(st) {
+    clearSelectedStationHighlight();
+    if (!st || !st.lat || !st.lon) return;
+
+    selectedStationId = st.stop_id;
+    const highlightIcon = L.divIcon({
+        className: 'selected-station-marker',
+        html: '<div class="selected-station-inner"></div>',
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+    });
+
+    selectedStationHighlightLayer = L.marker([st.lat, st.lon], {
+        icon: highlightIcon,
+        zIndexOffset: 1000
+    }).addTo(map);
+}
+
+function clearSelectedTrainRoute() {
+    if (selectedTrainRouteLayer) {
+        map.removeLayer(selectedTrainRouteLayer);
+        selectedTrainRouteLayer = null;
+    }
+}
+
+async function drawSelectedTrainRoute(trainNum) {
+    clearSelectedTrainRoute();
+    if (!trainNum) return;
+
+    try {
+        const resp = await fetch(`/api/trains/${encodeURIComponent(trainNum)}`);
+        if (!resp.ok) return;
+        const details = await resp.json();
+
+        let coords = [];
+        const activeTr = activeTrainsData.find(t => t.train_number === trainNum || t.trip_id === trainNum);
+        if (activeTr && activeTr.path && activeTr.path.length > 0) {
+            coords = activeTr.path.map(p => [p.lat, p.lon]);
+        }
+
+        if (coords.length < 2 && details.lat && details.lon) {
+            coords = [[details.lat, details.lon]];
+        }
+
+        if (coords.length < 2 && activeTr && activeTr.prev_station_id && activeTr.next_station_id) {
+            const segKey = `${activeTr.prev_station_id}->${activeTr.next_station_id}`;
+            if (segmentPathsMap[segKey]) {
+                coords = segmentPathsMap[segKey].map(p => [p.lat, p.lon]);
+            }
+        }
+
+        if (coords.length >= 2) {
+            const glowLine = L.polyline(coords, {
+                color: '#ffea00',
+                weight: 10,
+                opacity: 0.8,
+                lineCap: 'round',
+                lineJoin: 'round'
+            });
+
+            const coreLine = L.polyline(coords, {
+                color: '#ffffff',
+                weight: 4,
+                opacity: 1,
+                lineCap: 'round',
+                lineJoin: 'round'
+            });
+
+            selectedTrainRouteLayer = L.layerGroup([glowLine, coreLine]).addTo(map);
+        }
+    } catch (e) {
+        console.error('Failed to draw train route highlight:', e);
+    }
 }
 
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -1128,6 +1215,7 @@ async function openSegmentDetails(seg) {
 }
 
 async function openStationTimetable(station) {
+    highlightSelectedStation(station);
     try {
         const resp = await fetch(`/api/stations/${encodeURIComponent(station.stop_id)}/timetable`);
         const entries = await resp.json();
@@ -1221,6 +1309,8 @@ function openTrainDetails(train) {
     const trNum = train.train_number || train.trip_id;
     currentOpenedTrainNum = trNum;
     selectedTrainNum = trNum;
+
+    drawSelectedTrainRoute(trNum);
 
     const activeTr = activeTrainsData.find(t => t.train_number === trNum || t.trip_id === trNum);
     if (activeTr) {
