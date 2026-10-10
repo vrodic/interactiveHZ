@@ -1,15 +1,23 @@
 package main
 
 import (
+	"compress/gzip"
+	"context"
 	"embed"
 	"fmt"
+
+	_ "time/tzdata"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"time"
 
 	"hz-train-map/api"
@@ -19,6 +27,28 @@ import (
 
 //go:embed web/static/*
 var staticEmbedFS embed.FS
+
+type gzipResponseWriter struct {
+	io.Writer
+	http.ResponseWriter
+}
+
+func (w gzipResponseWriter) Write(b []byte) (int, error) {
+	return w.Writer.Write(b)
+}
+
+func gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") || strings.Contains(r.URL.Path, "/api/delays/stream") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		next.ServeHTTP(gzipResponseWriter{Writer: gz, ResponseWriter: w}, r)
+	})
+}
 
 func main() {
 	dbPath := os.Getenv("DB_PATH")
@@ -69,6 +99,11 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+
 	mux.HandleFunc("/api/search", server.Search)
 	mux.HandleFunc("/api/stations", server.GetStations)
 	mux.HandleFunc("/api/stations/", server.GetStationTimetable)
@@ -92,16 +127,39 @@ func main() {
 	}
 
 	serverURL := fmt.Sprintf("http://localhost:%s", port)
-	log.Printf("HŽ Interactive Train Map server listening on :%s", port)
+
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      gzipMiddleware(mux),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("HŽ Interactive Train Map server listening on :%s", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server ListenAndServe error: %v", err)
+		}
+	}()
 
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		openBrowser(serverURL)
 	}()
 
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatalf("Server stopped: %v", err)
+	<-stopChan
+	log.Println("Shutting down server gracefully...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
 	}
+	log.Println("Server stopped.")
 }
 
 func openBrowser(url string) {

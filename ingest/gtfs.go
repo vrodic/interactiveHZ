@@ -90,7 +90,7 @@ func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
 	}
 	defer tx.Rollback()
 
-	clearTables := []string{"stop_times", "trips", "routes", "calendar", "stations"}
+	clearTables := []string{"stop_times", "trips", "routes", "calendar_dates", "calendar", "stations"}
 	for _, tbl := range clearTables {
 		if _, err := tx.Exec("DELETE FROM " + tbl); err != nil {
 			log.Printf("Warning clearing table %s: %v", tbl, err)
@@ -120,6 +120,12 @@ func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
 	if f, ok := fileMap["calendar.txt"]; ok {
 		if err := loadCalendar(tx, f); err != nil {
 			return fmt.Errorf("failed to load calendar: %w", err)
+		}
+	}
+
+	if f, ok := fileMap["calendar_dates.txt"]; ok {
+		if err := loadCalendarDates(tx, f); err != nil {
+			log.Printf("Warning loading calendar_dates.txt: %v", err)
 		}
 	}
 
@@ -161,9 +167,19 @@ func parseCSVHeader(r *csv.Reader) (map[string]int, error) {
 	}
 	idxMap := make(map[string]int)
 	for i, col := range header {
-		idxMap[strings.TrimSpace(col)] = i
+		cleanCol := strings.TrimPrefix(col, "\xef\xbb\xbf")
+		cleanCol = strings.TrimPrefix(cleanCol, "\ufeff")
+		cleanCol = strings.TrimSpace(cleanCol)
+		idxMap[cleanCol] = i
 	}
 	return idxMap, nil
+}
+
+func getRecordVal(record []string, idxMap map[string]int, key string) string {
+	if idx, ok := idxMap[key]; ok && idx >= 0 && idx < len(record) {
+		return strings.TrimSpace(record[idx])
+	}
+	return ""
 }
 
 func loadStops(tx *sql.Tx, file *zip.File) error {
@@ -198,18 +214,19 @@ func loadStops(tx *sql.Tx, file *zip.File) error {
 			continue
 		}
 
-		stopID := record[idxMap["stop_id"]]
-		stopName := record[idxMap["stop_name"]]
-		latStr := record[idxMap["stop_lat"]]
-		lonStr := record[idxMap["stop_lon"]]
+		stopID := getRecordVal(record, idxMap, "stop_id")
+		stopName := getRecordVal(record, idxMap, "stop_name")
+		latStr := getRecordVal(record, idxMap, "stop_lat")
+		lonStr := getRecordVal(record, idxMap, "stop_lon")
+
+		if stopID == "" || stopName == "" {
+			continue
+		}
 
 		lat, _ := strconv.ParseFloat(latStr, 64)
 		lon, _ := strconv.ParseFloat(lonStr, 64)
 
-		_, err = stmt.Exec(stopID, stopName, lat, lon)
-		if err != nil {
-			log.Printf("Error inserting station %s: %v", stopID, err)
-		}
+		_, _ = stmt.Exec(stopID, stopName, lat, lon)
 	}
 	return nil
 }
@@ -354,18 +371,63 @@ func loadCalendar(tx *sql.Tx, file *zip.File) error {
 			continue
 		}
 
-		serviceID := record[idxMap["service_id"]]
-		startDate := record[idxMap["start_date"]]
-		endDate := record[idxMap["end_date"]]
-		mon, _ := strconv.Atoi(record[idxMap["monday"]])
-		tue, _ := strconv.Atoi(record[idxMap["tuesday"]])
-		wed, _ := strconv.Atoi(record[idxMap["wednesday"]])
-		thu, _ := strconv.Atoi(record[idxMap["thursday"]])
-		fri, _ := strconv.Atoi(record[idxMap["friday"]])
-		sat, _ := strconv.Atoi(record[idxMap["saturday"]])
-		sun, _ := strconv.Atoi(record[idxMap["sunday"]])
+		serviceID := getRecordVal(record, idxMap, "service_id")
+		startDate := getRecordVal(record, idxMap, "start_date")
+		endDate := getRecordVal(record, idxMap, "end_date")
+		mon, _ := strconv.Atoi(getRecordVal(record, idxMap, "monday"))
+		tue, _ := strconv.Atoi(getRecordVal(record, idxMap, "tuesday"))
+		wed, _ := strconv.Atoi(getRecordVal(record, idxMap, "wednesday"))
+		thu, _ := strconv.Atoi(getRecordVal(record, idxMap, "thursday"))
+		fri, _ := strconv.Atoi(getRecordVal(record, idxMap, "friday"))
+		sat, _ := strconv.Atoi(getRecordVal(record, idxMap, "saturday"))
+		sun, _ := strconv.Atoi(getRecordVal(record, idxMap, "sunday"))
 
-		_, _ = stmt.Exec(serviceID, startDate, endDate, mon, tue, wed, thu, fri, sat, sun)
+		if serviceID != "" {
+			_, _ = stmt.Exec(serviceID, startDate, endDate, mon, tue, wed, thu, fri, sat, sun)
+		}
+	}
+	return nil
+}
+
+func loadCalendarDates(tx *sql.Tx, file *zip.File) error {
+	rc, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	r := csv.NewReader(rc)
+	r.FieldsPerRecord = -1
+	idxMap, err := parseCSVHeader(r)
+	if err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO calendar_dates (service_id, date, exception_type)
+		VALUES (?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for {
+		record, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			continue
+		}
+
+		serviceID := getRecordVal(record, idxMap, "service_id")
+		dateStr := getRecordVal(record, idxMap, "date")
+		excType, _ := strconv.Atoi(getRecordVal(record, idxMap, "exception_type"))
+
+		if serviceID != "" && dateStr != "" {
+			_, _ = stmt.Exec(serviceID, dateStr, excType)
+		}
 	}
 	return nil
 }
@@ -403,11 +465,15 @@ func loadStopTimes(tx *sql.Tx, file *zip.File) error {
 			continue
 		}
 
-		tripID := record[idxMap["trip_id"]]
-		arrTime := record[idxMap["arrival_time"]]
-		depTime := record[idxMap["departure_time"]]
-		stopID := record[idxMap["stop_id"]]
-		seq, _ := strconv.Atoi(record[idxMap["stop_sequence"]])
+		tripID := getRecordVal(record, idxMap, "trip_id")
+		arrTime := getRecordVal(record, idxMap, "arrival_time")
+		depTime := getRecordVal(record, idxMap, "departure_time")
+		stopID := getRecordVal(record, idxMap, "stop_id")
+		seq, _ := strconv.Atoi(getRecordVal(record, idxMap, "stop_sequence"))
+
+		if tripID == "" || stopID == "" {
+			continue
+		}
 
 		arrSec := TimeToSeconds(arrTime)
 		depSec := TimeToSeconds(depTime)

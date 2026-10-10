@@ -50,6 +50,12 @@
         <div id="time-controls">
             <button id="realtime-btn" class="time-btn active">🔴 Realtime</button>
             <button id="play-btn" class="time-btn">▶ Play</button>
+            <select id="speed-select" class="speed-select" title="Playback Speed">
+                <option value="1">1x</option>
+                <option value="5">5x</option>
+                <option value="10">10x</option>
+                <option value="60">60x</option>
+            </select>
             <span id="time-display" class="time-display">12:00:00</span>
             <input type="range" id="time-slider" class="time-slider" min="0" max="86399" value="43200">
         </div>

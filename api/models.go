@@ -35,6 +35,8 @@ type RoutePlanEntry struct {
 	DurationMinutes        int    `json:"duration_minutes"`
 	DelayMinutes           int    `json:"delay_minutes"`
 	IsNearestFuture        bool   `json:"is_nearest_future,omitempty"`
+	IsTransfer             bool   `json:"is_transfer,omitempty"`
+	TransferStationName    string `json:"transfer_station_name,omitempty"`
 }
 
 type DashboardStats struct {
@@ -44,7 +46,7 @@ type DashboardStats struct {
 	AvgDelayMinutes     float64       `json:"avg_delay_minutes"`
 	MaxDelayMinutes     int           `json:"max_delay_minutes"`
 	TotalStations       int           `json:"total_stations"`
-	TotalTripsToday     int           `json:"total_trips_today"`
+	TripsRunningToday   int           `json:"trips_running_today"`
 	RecentDelayedTrains []ActiveTrain `json:"recent_delayed_trains"`
 }
 

@@ -147,6 +147,22 @@ body, html {
     background: #0066cc;
 }
 
+.speed-select {
+    background: #2a3240;
+    border: 1px solid #3a4250;
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    outline: none;
+}
+
+.speed-select:hover {
+    border-color: #0066cc;
+}
+
 .time-display {
     font-family: 'Courier New', Courier, monospace;
     font-size: 18px;

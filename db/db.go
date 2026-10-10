@@ -27,6 +27,10 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	if _, err := database.Exec("PRAGMA busy_timeout = 5000;"); err != nil {
+		log.Printf("Warning: failed to set busy timeout: %v", err)
+	}
+
 	if dbPath != ":memory:" {
 		if _, err := database.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 			log.Printf("Warning: failed to set WAL mode: %v", err)
@@ -89,6 +93,14 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		saturday INTEGER,
 		sunday INTEGER
 	);
+
+	CREATE TABLE IF NOT EXISTS calendar_dates (
+		service_id TEXT NOT NULL,
+		date TEXT NOT NULL,
+		exception_type INTEGER NOT NULL,
+		PRIMARY KEY (service_id, date)
+	);
+	CREATE INDEX IF NOT EXISTS idx_calendar_dates_date ON calendar_dates(date);
 
 	CREATE TABLE IF NOT EXISTS train_delays (
 		train_number TEXT PRIMARY KEY,
