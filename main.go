@@ -34,24 +34,28 @@ func main() {
 
 	server := api.NewServer(database)
 
+	localCacheDir := filepath.Dir(dbPath)
+	gtfsURL := ingest.DefaultGTFSURL
+
+	log.Println("Preparing GTFS data and warming track segment cache...")
+	if err := ingest.IngestGTFS(database, gtfsURL, localCacheDir); err != nil {
+		log.Printf("Initial GTFS ingestion warning: %v", err)
+	}
+
+	if osmWays, err := ingest.FetchAndCacheOSMRailways(database, localCacheDir); err == nil && len(osmWays) > 0 {
+		graph := api.BuildOSMGraph(osmWays)
+		server.SetOSMGraph(graph)
+		log.Printf("OSM railway graph built with %d track segments.", len(osmWays))
+	} else {
+		log.Printf("OSM railway ingestion warning: %v", err)
+	}
+
+	// Warm track segment cache synchronously so /api/segments is 100% pre-built in RAM before browser launches
+	segs := server.GetCachedSegments()
+	log.Printf("Track segment cache pre-warmed with %d segments.", len(segs))
+
+	// Background ticker for periodic 24h GTFS updates
 	go func() {
-		localCacheDir := filepath.Dir(dbPath)
-		gtfsURL := ingest.DefaultGTFSURL
-
-		log.Println("Running initial GTFS data ingestion in background...")
-		if err := ingest.IngestGTFS(database, gtfsURL, localCacheDir); err != nil {
-			log.Printf("Initial GTFS ingestion warning: %v", err)
-		}
-
-		if osmWays, err := ingest.FetchAndCacheOSMRailways(database, localCacheDir); err == nil && len(osmWays) > 0 {
-			graph := api.BuildOSMGraph(osmWays)
-			server.SetOSMGraph(graph)
-			log.Printf("OSM railway graph built with %d track segments.", len(osmWays))
-		} else {
-			log.Printf("OSM railway ingestion warning: %v", err)
-			go server.GetCachedSegments()
-		}
-
 		ticker := time.NewTicker(24 * time.Hour)
 		for range ticker.C {
 			log.Println("Periodic 24h ticker: updating GTFS data...")
@@ -60,6 +64,7 @@ func main() {
 			}
 		}
 	}()
+
 	server.StartBackgroundDelayWorker()
 
 	mux := http.NewServeMux()

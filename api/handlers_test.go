@@ -23,6 +23,9 @@ func setupTestDB(t *testing.T) *Server {
 		INSERT INTO routes (route_id, route_short_name, route_long_name)
 		VALUES ('r1', '20', 'Zagreb - Vinkovci');
 
+		INSERT INTO calendar (service_id, start_date, end_date, monday, tuesday, wednesday, thursday, friday, saturday, sunday)
+		VALUES ('serv1', '20200101', '20301231', 1, 1, 1, 1, 1, 1, 1);
+
 		INSERT INTO trips (trip_id, route_id, service_id, trip_short_name)
 		VALUES ('t2010', 'r1', 'serv1', '2010');
 

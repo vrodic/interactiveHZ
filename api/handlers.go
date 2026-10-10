@@ -77,7 +77,6 @@ func (s *Server) SetOSMGraph(graph *OSMGraph) {
 	s.osmGraph = graph
 	s.routeCache = sync.Map{}
 	s.InvalidateSegmentsCache()
-	go s.GetCachedSegments()
 }
 
 func (s *Server) GetCachedSegments() []SegmentSpeed {
@@ -1099,6 +1098,14 @@ func (s *Server) GetDashboardStats(w http.ResponseWriter, r *http.Request) {
 	if tsStr := r.URL.Query().Get("time"); tsStr != "" {
 		if sec, err := strconv.Atoi(tsStr); err == nil {
 			nowSec = sec
+		} else if parts := strings.Split(tsStr, ":"); len(parts) >= 2 {
+			h, _ := strconv.Atoi(parts[0])
+			m, _ := strconv.Atoi(parts[1])
+			sec := 0
+			if len(parts) >= 3 {
+				sec, _ = strconv.Atoi(parts[2])
+			}
+			nowSec = h*3600 + m*60 + sec
 		}
 	}
 
