@@ -45,3 +45,40 @@ func mathAbs(x float64) float64 {
 	}
 	return x
 }
+
+func TestCulicSopnicaDirectPath(t *testing.T) {
+	// Way 1 (Direct main line, shorter ~2.1 km)
+	// Way 2 (Freight loop, longer ~4.5 km with slightly closer candidate node)
+	ways := []ingest.OSMWay{
+		{
+			ID: 101, // Direct main line
+			Geometry: []ingest.OSMNode{
+				{Lat: 45.82084, Lon: 16.06361},
+				{Lat: 45.82270, Lon: 16.07450},
+				{Lat: 45.82457, Lon: 16.08579},
+			},
+		},
+		{
+			ID: 102, // Freight loop
+			Geometry: []ingest.OSMNode{
+				{Lat: 45.82084, Lon: 16.06361},
+				{Lat: 45.81500, Lon: 16.07000},
+				{Lat: 45.82448, Lon: 16.08578},
+			},
+		},
+	}
+
+	graph := BuildOSMGraph(ways)
+	path := graph.FindShortestPath(45.82084, 16.06361, 45.82457, 16.08579)
+
+	if len(path) == 0 {
+		t.Fatalf("Expected non-empty path")
+	}
+
+	// Verify path does not divert south to lat 45.8150
+	for _, pt := range path {
+		if pt.Lat < 45.818 {
+			t.Errorf("Path diverted too far south to freight loop: lat %f", pt.Lat)
+		}
+	}
+}

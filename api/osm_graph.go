@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"fmt"
 	"math"
+	"sort"
 
 	"hz-train-map/ingest"
 )
@@ -90,6 +91,35 @@ func (g *OSMGraph) FindNearestNode(lat, lon float64, maxDistKm float64) (nodeID,
 	return 0, bestDist
 }
 
+func (g *OSMGraph) FindCandidateNodes(lat, lon float64, maxDistKm float64, limit int) []nodeID {
+	type cand struct {
+		id   nodeID
+		dist float64
+	}
+	var cands []cand
+
+	for id, node := range g.nodes {
+		d := haversineKm(lat, lon, node.lat, node.lon)
+		if d <= maxDistKm {
+			cands = append(cands, cand{id: id, dist: d})
+		}
+	}
+
+	sort.Slice(cands, func(i, j int) bool {
+		return cands[i].dist < cands[j].dist
+	})
+
+	if len(cands) > limit {
+		cands = cands[:limit]
+	}
+
+	res := make([]nodeID, len(cands))
+	for i, c := range cands {
+		res[i] = c.id
+	}
+	return res
+}
+
 type pathItem struct {
 	id     nodeID
 	cost   float64
@@ -122,23 +152,9 @@ func (pq *priorityQueue) Pop() interface{} {
 	return item
 }
 
-func (g *OSMGraph) FindShortestPath(fromLat, fromLon, toLat, toLon float64) []LatLon {
-	if g == nil || len(g.nodes) == 0 {
-		return nil
-	}
-
-	startNodeID, d1 := g.FindNearestNode(fromLat, fromLon, 3.0)
-	endNodeID, d2 := g.FindNearestNode(toLat, toLon, 3.0)
-
-	if startNodeID == 0 || endNodeID == 0 {
-		return nil
-	}
-
+func (g *OSMGraph) searchPathBetween(startNodeID, endNodeID nodeID) ([]nodeID, float64) {
 	if startNodeID == endNodeID {
-		return []LatLon{
-			{Lat: fromLat, Lon: fromLon},
-			{Lat: toLat, Lon: toLon},
-		}
+		return []nodeID{startNodeID}, 0.0
 	}
 
 	targetNode := g.nodes[endNodeID]
@@ -192,7 +208,7 @@ func (g *OSMGraph) FindShortestPath(fromLat, fromLon, toLat, toLon float64) []La
 	}
 
 	if !found {
-		return nil
+		return nil, math.MaxFloat64
 	}
 
 	var pathNodes []nodeID
@@ -205,12 +221,57 @@ func (g *OSMGraph) FindShortestPath(fromLat, fromLon, toLat, toLon float64) []La
 		curr = prev[curr]
 	}
 
-	waypoints := make([]LatLon, 0, len(pathNodes)+2)
+	return pathNodes, dist[endNodeID]
+}
+
+func (g *OSMGraph) FindShortestPath(fromLat, fromLon, toLat, toLon float64) []LatLon {
+	if g == nil || len(g.nodes) == 0 {
+		return nil
+	}
+
+	startCandidates := g.FindCandidateNodes(fromLat, fromLon, 0.3, 5)
+	endCandidates := g.FindCandidateNodes(toLat, toLon, 0.3, 5)
+
+	if len(startCandidates) == 0 {
+		startNode, _ := g.FindNearestNode(fromLat, fromLon, 3.0)
+		if startNode != 0 {
+			startCandidates = []nodeID{startNode}
+		}
+	}
+
+	if len(endCandidates) == 0 {
+		endNode, _ := g.FindNearestNode(toLat, toLon, 3.0)
+		if endNode != 0 {
+			endCandidates = []nodeID{endNode}
+		}
+	}
+
+	if len(startCandidates) == 0 || len(endCandidates) == 0 {
+		return nil
+	}
+
+	var bestPathNodes []nodeID
+	bestDist := math.MaxFloat64
+
+	for _, startID := range startCandidates {
+		for _, endID := range endCandidates {
+			pathNodes, distKm := g.searchPathBetween(startID, endID)
+			if len(pathNodes) > 0 && distKm < bestDist {
+				bestDist = distKm
+				bestPathNodes = pathNodes
+			}
+		}
+	}
+
+	if len(bestPathNodes) == 0 {
+		return nil
+	}
+
+	waypoints := make([]LatLon, 0, len(bestPathNodes)+2)
 	waypoints = append(waypoints, LatLon{Lat: fromLat, Lon: fromLon})
 
-	for _, nid := range pathNodes {
+	for _, nid := range bestPathNodes {
 		n := g.nodes[nid]
-		// Avoid duplicate start/end point
 		if len(waypoints) > 0 {
 			last := waypoints[len(waypoints)-1]
 			if haversineKm(last.Lat, last.Lon, n.lat, n.lon) < 0.01 {
@@ -228,9 +289,6 @@ func (g *OSMGraph) FindShortestPath(fromLat, fromLon, toLat, toLon float64) []La
 	} else {
 		waypoints = append(waypoints, LatLon{Lat: toLat, Lon: toLon})
 	}
-
-	_ = d1
-	_ = d2
 
 	return waypoints
 }
