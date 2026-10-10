@@ -82,6 +82,23 @@ type ActiveTrain struct {
 	Path             []LatLon `json:"path,omitempty"`
 }
 
+type TrainDetails struct {
+	TrainNumber           string  `json:"train_number"`
+	TripID                string  `json:"trip_id"`
+	Headsign              string  `json:"headsign"`
+	FirstStationName      string  `json:"first_station_name"`
+	LastStationName       string  `json:"last_station_name"`
+	FirstDepartureTime    string  `json:"first_departure_time"`
+	LastArrivalTime       string  `json:"last_arrival_time"`
+	FirstDepartureSeconds int     `json:"first_departure_seconds"`
+	LastArrivalSeconds    int     `json:"last_arrival_seconds"`
+	DelayMinutes          int     `json:"delay_minutes"`
+	PositionStatus        string  `json:"position_status,omitempty"`
+	IsActive              bool    `json:"is_active"`
+	Lat                   float64 `json:"lat,omitempty"`
+	Lon                   float64 `json:"lon,omitempty"`
+}
+
 type TrainSegmentSpeed struct {
 	TrainNumber     string  `json:"train_number"`
 	TripID          string  `json:"trip_id"`

@@ -573,6 +573,75 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 	return activeTrains, nil
 }
 
+func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
+	trainNum := strings.TrimPrefix(r.URL.Path, "/api/trains/")
+	trainNum = strings.TrimSpace(trainNum)
+	if trainNum == "" {
+		trainNum = strings.TrimSpace(r.URL.Query().Get("train_number"))
+	}
+	if trainNum == "" {
+		http.Error(w, "train_number parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	zgNow := getZagrebTime()
+	nowSec := zgNow.Hour()*3600 + zgNow.Minute()*60 + zgNow.Second()
+
+	var details TrainDetails
+	details.TrainNumber = trainNum
+
+	query := `
+		SELECT t.trip_id, COALESCE(t.trip_headsign, ''),
+		       s_first.stop_name, st_first.departure_time, st_first.departure_seconds,
+		       s_last.stop_name, st_last.arrival_time, st_last.arrival_seconds
+		FROM trips t
+		JOIN stop_times st_first ON st_first.trip_id = t.trip_id AND st_first.stop_sequence = 1
+		JOIN stations s_first ON st_first.stop_id = s_first.stop_id
+		JOIN stop_times st_last ON st_last.trip_id = t.trip_id AND st_last.stop_sequence = (
+			SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id
+		)
+		JOIN stations s_last ON st_last.stop_id = s_last.stop_id
+		WHERE COALESCE(t.trip_short_name, t.trip_id) = ? OR t.trip_id = ?
+		LIMIT 1
+	`
+
+	err := s.db.QueryRow(query, trainNum, trainNum).Scan(
+		&details.TripID, &details.Headsign,
+		&details.FirstStationName, &details.FirstDepartureTime, &details.FirstDepartureSeconds,
+		&details.LastStationName, &details.LastArrivalTime, &details.LastArrivalSeconds,
+	)
+	if err != nil {
+		http.Error(w, "Train not found", http.StatusNotFound)
+		return
+	}
+
+	if details.FirstStationName == "" {
+		details.FirstStationName = details.Headsign
+	}
+	if details.LastStationName == "" {
+		details.LastStationName = details.Headsign
+	}
+
+	var delayMins int
+	var posStatus string
+	_ = s.db.QueryRow("SELECT delay_minutes, COALESCE(position_status, '') FROM train_delays WHERE train_number = ? AND updated_at >= datetime('now', '-6 hours')", trainNum).Scan(&delayMins, &posStatus)
+	details.DelayMinutes = delayMins
+	details.PositionStatus = posStatus
+
+	activeTrains, _ := s.ComputeActiveTrains(nowSec)
+	for _, tr := range activeTrains {
+		if tr.TrainNumber == trainNum || tr.TripID == details.TripID {
+			details.IsActive = true
+			details.Lat = tr.CurrentLat
+			details.Lon = tr.CurrentLon
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(details)
+}
+
 func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 	zgNow := getZagrebTime()
 	secondsOfDay := zgNow.Hour()*3600 + zgNow.Minute()*60 + zgNow.Second()

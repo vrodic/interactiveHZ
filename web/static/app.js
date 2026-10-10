@@ -10,6 +10,7 @@ let segmentPathLengthsMap = {};
 let segmentsLayerGroup = L.layerGroup();
 let segmentBadgesLayerGroup = L.layerGroup();
 let currentOpenedTrainNum = null;
+let selectedTrainNum = null;
 
 let currentTimeSec = getCurrentSecondsOfDay();
 let isRealtime = true;
@@ -69,7 +70,6 @@ document.addEventListener('DOMContentLoaded', () => {
 let hideSpeedMarkers = false;
 
 function initMap() {
-    // Zoomed between Zagreb Zapadni kolodvor [45.8117, 15.9525] and Prečec [45.8078, 16.3262]
     map = L.map('map').fitBounds([
         [45.8117, 15.9525],
         [45.8078, 16.3262]
@@ -238,25 +238,11 @@ function initControls() {
     });
 
     function selectSearchResult(item) {
-        map.setView([item.lat, item.lon], 12);
         if (item.type === 'station') {
+            map.setView([item.lat, item.lon], 12);
             openStationTimetable({ stop_id: item.id, stop_name: item.title, lat: item.lat, lon: item.lon });
         } else if (item.type === 'train') {
-            const activeTr = activeTrainsData.find(t => t.train_number === item.train_number);
-            if (activeTr) {
-                openTrainDetails(activeTr);
-            } else {
-                updateTrainDetailsPanel({
-                    train_number: item.train_number,
-                    headsign: item.subtitle,
-                    first_station_name: 'Scheduled Route',
-                    last_station_name: 'Scheduled Route',
-                    prev_station_name: 'Scheduled',
-                    next_station_name: 'Scheduled',
-                    progress: 0,
-                    delay_minutes: 0
-                }, true);
-            }
+            openTrainDetails({ train_number: item.train_number || item.id, headsign: item.subtitle });
         }
         searchResults.style.display = 'none';
         searchInput.value = '';
@@ -304,6 +290,8 @@ function initControls() {
     document.getElementById('close-panel').addEventListener('click', () => {
         document.getElementById('side-panel').style.display = 'none';
         currentOpenedTrainNum = null;
+        selectedTrainNum = null;
+        updateTrainMarkersClientSide();
     });
 }
 
@@ -481,6 +469,7 @@ function updateTrainMarkersClientSide() {
         }
 
         const isDelayed = train.delay_minutes > 0;
+        const isSelected = selectedTrainNum && (train.train_number === selectedTrainNum || train.trip_id === selectedTrainNum);
 
         if (trainMarkersMap[train.trip_id]) {
             const marker = trainMarkersMap[train.trip_id];
@@ -496,10 +485,15 @@ function updateTrainMarkersClientSide() {
                 } else {
                     el.classList.remove('delayed');
                 }
+                if (isSelected) {
+                    el.classList.add('selected-train-marker');
+                } else {
+                    el.classList.remove('selected-train-marker');
+                }
             }
         } else {
             const icon = L.divIcon({
-                className: `train-marker-container ${isDelayed ? 'delayed' : ''}`,
+                className: `train-marker-container ${isDelayed ? 'delayed' : ''} ${isSelected ? 'selected-train-marker' : ''}`,
                 html: getTrainSVGHTML(train.train_number, isDelayed, bearing),
                 iconSize: [50, 62],
                 iconAnchor: [25, 18]
@@ -948,22 +942,7 @@ async function findRoutePlans() {
             link.addEventListener('click', (e) => {
                 e.preventDefault();
                 const trainNum = link.getAttribute('data-train');
-                const activeTr = activeTrainsData.find(t => t.train_number === trainNum);
-                if (activeTr) {
-                    map.setView([activeTr.lat, activeTr.lon], 11);
-                    openTrainDetails(activeTr);
-                } else {
-                    updateTrainDetailsPanel({
-                        train_number: trainNum,
-                        headsign: 'Scheduled Train',
-                        first_station_name: 'Scheduled Route',
-                        last_station_name: 'Scheduled Route',
-                        prev_station_name: 'Scheduled',
-                        next_station_name: 'Scheduled',
-                        progress: 0,
-                        delay_minutes: 0
-                    }, true);
-                }
+                openTrainDetails({ train_number: trainNum });
             });
         });
 
@@ -1198,22 +1177,7 @@ async function openStationTimetable(station) {
                     popupNode.querySelectorAll('.timetable-row').forEach(row => {
                         row.addEventListener('click', () => {
                             const trNum = row.getAttribute('data-train');
-                            const activeTr = activeTrainsData.find(t => t.train_number === trNum);
-                            if (activeTr) {
-                                map.setView([activeTr.lat, activeTr.lon], 11);
-                                openTrainDetails(activeTr);
-                            } else {
-                                updateTrainDetailsPanel({
-                                    train_number: trNum,
-                                    headsign: 'Scheduled Train',
-                                    first_station_name: 'Scheduled Route',
-                                    last_station_name: 'Scheduled Route',
-                                    prev_station_name: 'Scheduled',
-                                    next_station_name: 'Scheduled',
-                                    progress: 0,
-                                    delay_minutes: 0
-                                }, true);
-                            }
+                            openTrainDetails({ train_number: trNum });
                         });
                     });
                 }
@@ -1256,11 +1220,132 @@ function updateTrainMarkers() {
 function openTrainDetails(train) {
     const trNum = train.train_number || train.trip_id;
     currentOpenedTrainNum = trNum;
+    selectedTrainNum = trNum;
+
     const activeTr = activeTrainsData.find(t => t.train_number === trNum || t.trip_id === trNum);
     if (activeTr) {
+        if (activeTr.lat && activeTr.lon) {
+            map.panTo([activeTr.lat, activeTr.lon]);
+        }
         updateTrainDetailsPanel(activeTr, true);
     } else {
-        updateTrainDetailsPanel(train, true);
+        fetchAndDisplayTrainDetails(trNum);
+    }
+
+    updateTrainMarkersClientSide();
+}
+
+async function fetchAndDisplayTrainDetails(trainNum) {
+    const panel = document.getElementById('side-panel');
+    const content = document.getElementById('panel-content');
+
+    panel.style.display = 'block';
+    content.innerHTML = `<p style="color: #a0aec0; text-align: center; padding: 20px;">Loading details for Train ${escapeHTML(trainNum)}...</p>`;
+
+    try {
+        const resp = await fetch(`/api/trains/${encodeURIComponent(trainNum)}`);
+        if (!resp.ok) {
+            content.innerHTML = `<p style="color: #ef4444; text-align: center; padding: 20px;">Train ${escapeHTML(trainNum)} not found.</p>`;
+            return;
+        }
+
+        const data = await resp.json();
+
+        let statusStr = "Scheduled Train";
+        let statusBadgeClass = "badge-on-time";
+
+        if (data.is_active) {
+            statusStr = "Currently Active on Route";
+            statusBadgeClass = "badge-on-time";
+        } else if (data.position_status && data.position_status.toLowerCase() === "arrived") {
+            statusStr = "Completed Journey";
+            statusBadgeClass = "badge-on-time";
+        } else {
+            const depSec = data.first_departure_seconds;
+            const arrSec = data.last_arrival_seconds;
+            if (currentTimeSec < depSec) {
+                const depHM = stripSeconds(data.first_departure_time);
+                statusStr = `Scheduled (Departs at ${depHM})`;
+            } else if (currentTimeSec > arrSec) {
+                const arrHM = stripSeconds(data.last_arrival_time);
+                statusStr = `Completed (Arrived at ${arrHM})`;
+            } else {
+                statusStr = "Not running at selected time";
+            }
+        }
+
+        const delayBadge = data.delay_minutes > 0
+            ? `<span class="badge badge-delay">+${data.delay_minutes} min delay</span>`
+            : `<span class="badge ${statusBadgeClass}">${escapeHTML(statusStr)}</span>`;
+
+        content.innerHTML = `
+            <div class="panel-header">
+                <div class="panel-title">🚆 Train ${escapeHTML(data.train_number)}</div>
+                ${delayBadge}
+            </div>
+            <div class="detail-row">
+                <div class="detail-label">First Station (Origin)</div>
+                <div class="detail-value">🚩 ${escapeHTML(data.first_station_name)}</div>
+            </div>
+            <div class="detail-row">
+                <div class="detail-label">Last Station (Destination)</div>
+                <div class="detail-value">🏁 ${escapeHTML(data.last_station_name)}</div>
+            </div>
+            <div class="detail-row">
+                <div class="detail-label">Route / Headsign</div>
+                <div class="detail-value">${escapeHTML(data.headsign || 'HŽ Passenger Transport')}</div>
+            </div>
+            <div class="detail-row">
+                <div class="detail-label">Scheduled Journey Time</div>
+                <div class="detail-value">🕒 ${stripSeconds(data.first_departure_time)} ➔ ${stripSeconds(data.last_arrival_time)}</div>
+            </div>
+            <div class="detail-row">
+                <div class="detail-label">Current Status</div>
+                <div class="detail-value" style="color: ${data.is_active ? '#10b981' : '#a0aec0'}; font-weight: bold;">
+                    ${escapeHTML(statusStr)}
+                </div>
+            </div>
+            <div class="detail-row">
+                <div class="detail-label">Delay Status</div>
+                <div class="detail-value">${data.delay_minutes > 0 ? `<span style="color:#ef4444; font-weight:bold;">Running with +${data.delay_minutes} min delay</span>` : '<span style="color:#10b981; font-weight:bold;">On Time / No Delay</span>'}</div>
+            </div>
+            <button class="refresh-delay-btn" id="check-delay-btn">📡 Refresh Live Delay Status</button>
+            <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;"></div>
+        `;
+
+        if (data.is_active && data.lat && data.lon) {
+            map.panTo([data.lat, data.lon]);
+        }
+
+        document.getElementById('check-delay-btn').addEventListener('click', async () => {
+            const resultDiv = document.getElementById('live-delay-result');
+            resultDiv.innerHTML = '<em>Fetching live status from hzpp.app...</em>';
+            try {
+                const resp = await fetch(`/api/train-delay?trainId=${encodeURIComponent(data.train_number)}`);
+                const liveData = await resp.json();
+                if (liveData.success && liveData.data) {
+                    const live = liveData.data;
+                    const liveDelayMins = live.delayMinutes || 0;
+                    const liveDelayStr = liveDelayMins > 0 ? `+${liveDelayMins} min` : 'On Time / No Delay';
+
+                    resultDiv.innerHTML = `
+                        <div style="background: #1e242e; padding: 10px; border-radius: 6px; border: 1px solid #3a4250;">
+                            <div><strong>Status:</strong> ${escapeHTML(live.positionStatus || 'Unknown')}</div>
+                            <div><strong>Live Delay:</strong> <span style="color:${liveDelayMins > 0 ? '#ef4444' : '#10b981'}">${escapeHTML(liveDelayStr)}</span></div>
+                            <div><strong>Last Station:</strong> ${escapeHTML(live.lastStation || 'N/A')}</div>
+                            <div><strong>Next Station:</strong> ${escapeHTML(live.nextStation || 'N/A')}</div>
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = '<span style="color: #ef4444;">No live status available for this train.</span>';
+                }
+            } catch (e) {
+                resultDiv.innerHTML = `<span style="color: #ef4444;">Failed to fetch live delay: ${escapeHTML(e.message)}</span>`;
+            }
+        });
+
+    } catch (err) {
+        content.innerHTML = `<p style="color: #ef4444; text-align: center; padding: 20px;">Failed to load train details: ${escapeHTML(err.message)}</p>`;
     }
 }
 
@@ -1270,7 +1355,7 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
 
     const delayBadge = train.delay_minutes > 0
         ? `<span class="badge badge-delay">+${train.delay_minutes} min delay</span>`
-        : `<span class="badge badge-on-time">On Time</span>`;
+        : `<span class="badge badge-on-time">Active on Route</span>`;
 
     const originStation = escapeHTML(train.first_station_name || 'Origin Station');
     const destStation = escapeHTML(train.last_station_name || 'Destination Station');

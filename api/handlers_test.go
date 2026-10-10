@@ -93,6 +93,35 @@ func TestGetStationTimetable(t *testing.T) {
 	}
 }
 
+func TestGetTrainDetails(t *testing.T) {
+	srv := setupTestDB(t)
+
+	req := httptest.NewRequest("GET", "/api/trains/2010", nil)
+	w := httptest.NewRecorder()
+
+	srv.GetTrainDetails(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK, got %d", res.StatusCode)
+	}
+
+	var details TrainDetails
+	if err := json.NewDecoder(res.Body).Decode(&details); err != nil {
+		t.Fatalf("Failed to decode train details response: %v", err)
+	}
+
+	if details.TrainNumber != "2010" {
+		t.Errorf("Expected train number 2010, got %s", details.TrainNumber)
+	}
+	if details.FirstStationName != "Zagreb Glavni Kolodvor" {
+		t.Errorf("Expected Zagreb Glavni Kolodvor, got %s", details.FirstStationName)
+	}
+	if details.LastStationName != "Vinkovci" {
+		t.Errorf("Expected Vinkovci, got %s", details.LastStationName)
+	}
+}
+
 func TestGetActiveTrains(t *testing.T) {
 	srv := setupTestDB(t)
 
