@@ -11,13 +11,13 @@ func TestInitDB(t *testing.T) {
 	}
 	defer database.Close()
 
-	var spatialiteVer string
-	err = database.QueryRow("SELECT spatialite_version()").Scan(&spatialiteVer)
+	var stationTableCount int
+	err = database.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='stations'").Scan(&stationTableCount)
 	if err != nil {
-		t.Fatalf("Failed to get spatialite version: %v", err)
+		t.Fatalf("Failed to query stations table count: %v", err)
 	}
 
-	if spatialiteVer == "" {
-		t.Errorf("Expected spatialite version, got empty string")
+	if stationTableCount != 1 {
+		t.Errorf("Expected stations table to exist, got count %d", stationTableCount)
 	}
 }

@@ -181,8 +181,8 @@ func loadStops(tx *sql.Tx, file *zip.File) error {
 	}
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO stations (stop_id, stop_name, stop_lat, stop_lon, geom)
-		VALUES (?, ?, ?, ?, MakePoint(?, ?, 4326))
+		INSERT INTO stations (stop_id, stop_name, stop_lat, stop_lon)
+		VALUES (?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -206,7 +206,7 @@ func loadStops(tx *sql.Tx, file *zip.File) error {
 		lat, _ := strconv.ParseFloat(latStr, 64)
 		lon, _ := strconv.ParseFloat(lonStr, 64)
 
-		_, err = stmt.Exec(stopID, stopName, lat, lon, lon, lat)
+		_, err = stmt.Exec(stopID, stopName, lat, lon)
 		if err != nil {
 			log.Printf("Error inserting station %s: %v", stopID, err)
 		}

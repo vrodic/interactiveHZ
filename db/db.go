@@ -6,51 +6,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
 
-	"github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3"
 )
 
-var (
-	registerOnce sync.Once
-	DriverName   = "sqlite3_spatialite"
-)
-
-func initDriver() {
-	registerOnce.Do(func() {
-		sql.Register(DriverName, &sqlite3.SQLiteDriver{
-			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
-				entryPoints := []string{"sqlite3_modspatialite_init", "sqlite3_spatialite_init", ""}
-				extPaths := []string{
-					"mod_spatialite",
-					"mod_spatialite.dylib",
-					"/opt/homebrew/lib/mod_spatialite.dylib",
-					"/opt/homebrew/lib/mod_spatialite",
-					"/usr/local/lib/mod_spatialite.dylib",
-					"/usr/local/lib/mod_spatialite",
-					"/usr/lib/x86_64-linux-gnu/mod_spatialite",
-					"/usr/lib/x86_64-linux-gnu/mod_spatialite.so",
-				}
-
-				var lastErr error
-				for _, ext := range extPaths {
-					for _, entry := range entryPoints {
-						if err := conn.LoadExtension(ext, entry); err == nil {
-							return nil
-						} else {
-							lastErr = err
-						}
-					}
-				}
-				return fmt.Errorf("failed to load SpatiaLite extension: %w", lastErr)
-			},
-		})
-	})
-}
+const DriverName = "sqlite3"
 
 func InitDB(dbPath string) (*sql.DB, error) {
-	initDriver()
-
 	if dbPath != ":memory:" {
 		dir := filepath.Dir(dbPath)
 		if dir != "." && dir != "" {
@@ -68,16 +30,6 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	if dbPath != ":memory:" {
 		if _, err := database.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 			log.Printf("Warning: failed to set WAL mode: %v", err)
-		}
-	}
-
-	var exists int
-	err = database.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='spatial_ref_sys'").Scan(&exists)
-	if err != nil || exists == 0 {
-		log.Println("Initializing SpatiaLite spatial metadata...")
-		_, err = database.Exec("SELECT InitSpatialMetaData(1)")
-		if err != nil {
-			log.Printf("InitSpatialMetaData warning: %v", err)
 		}
 	}
 
@@ -181,15 +133,6 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		_ = database.QueryRow("SELECT COUNT(*) FROM stop_times").Scan(&stCount)
 		if stCount > 0 {
 			_ = PopulateRouteSegments(database)
-		}
-	}
-
-	var geomExists int
-	err = database.QueryRow("SELECT count(*) FROM geometry_columns WHERE f_table_name='stations' AND f_geometry_column='geom'").Scan(&geomExists)
-	if err != nil || geomExists == 0 {
-		_, err = database.Exec("SELECT AddGeometryColumn('stations', 'geom', 4326, 'POINT', 'XY')")
-		if err != nil {
-			log.Printf("AddGeometryColumn stations warning: %v", err)
 		}
 	}
 
