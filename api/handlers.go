@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -65,12 +64,10 @@ type Server struct {
 }
 
 func NewServer(db *sql.DB) *Server {
-	srv := &Server{
+	return &Server{
 		db:          db,
 		broadcaster: NewBroadcaster(),
 	}
-	go srv.GetCachedSegments()
-	return srv
 }
 
 func (s *Server) SetOSMGraph(graph *OSMGraph) {
@@ -1147,12 +1144,3 @@ func (s *Server) GetDashboardStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
 }
-
-type dashboardResponseWriter struct {
-	header http.Header
-	body   *bytes.Buffer
-}
-
-func (w *dashboardResponseWriter) Header() http.Header { return w.header }
-func (w *dashboardResponseWriter) Write(b []byte) (int, error) { return w.body.Write(b) }
-func (w *dashboardResponseWriter) WriteHeader(statusCode int) {}

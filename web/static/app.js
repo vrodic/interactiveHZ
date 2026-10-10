@@ -1114,32 +1114,37 @@ async function openStationTimetable(station) {
             .setContent(timetableHTML)
             .openOn(map);
 
-        setTimeout(() => {
-            const popupNode = popup.getElement();
-            if (popupNode) {
-                popupNode.querySelectorAll('.timetable-row').forEach(row => {
-                    row.addEventListener('click', () => {
-                        const trNum = row.getAttribute('data-train');
-                        const activeTr = activeTrainsData.find(t => t.train_number === trNum);
-                        if (activeTr) {
-                            map.setView([activeTr.lat, activeTr.lon], 11);
-                            openTrainDetails(activeTr);
-                        } else {
-                            updateTrainDetailsPanel({
-                                train_number: trNum,
-                                headsign: 'Scheduled Train',
-                                first_station_name: 'Scheduled Route',
-                                last_station_name: 'Scheduled Route',
-                                prev_station_name: 'Scheduled',
-                                next_station_name: 'Scheduled',
-                                progress: 0,
-                                delay_minutes: 0
-                            }, true);
-                        }
+        const onPopupOpen = (e) => {
+            if (e.popup === popup) {
+                map.off('popupopen', onPopupOpen);
+                const popupNode = popup.getElement();
+                if (popupNode) {
+                    popupNode.querySelectorAll('.timetable-row').forEach(row => {
+                        row.addEventListener('click', () => {
+                            const trNum = row.getAttribute('data-train');
+                            const activeTr = activeTrainsData.find(t => t.train_number === trNum);
+                            if (activeTr) {
+                                map.setView([activeTr.lat, activeTr.lon], 11);
+                                openTrainDetails(activeTr);
+                            } else {
+                                updateTrainDetailsPanel({
+                                    train_number: trNum,
+                                    headsign: 'Scheduled Train',
+                                    first_station_name: 'Scheduled Route',
+                                    last_station_name: 'Scheduled Route',
+                                    prev_station_name: 'Scheduled',
+                                    next_station_name: 'Scheduled',
+                                    progress: 0,
+                                    delay_minutes: 0
+                                }, true);
+                            }
+                        });
                     });
-                });
+                }
             }
-        }, 50);
+        };
+
+        map.on('popupopen', onPopupOpen);
 
     } catch (err) {
         console.error('Failed to load station timetable:', err);
@@ -1170,8 +1175,14 @@ function updateTrainMarkers() {
 }
 
 function openTrainDetails(train) {
-    currentOpenedTripId = train.trip_id || train.train_number;
-    updateTrainDetailsPanel(train, true);
+    const trNum = train.train_number || train.trip_id;
+    currentOpenedTripId = trNum;
+    const activeTr = activeTrainsData.find(t => t.train_number === trNum || t.trip_id === trNum);
+    if (activeTr) {
+        updateTrainDetailsPanel(activeTr, true);
+    } else {
+        updateTrainDetailsPanel(train, true);
+    }
 }
 
 function updateTrainDetailsPanel(train, isNewOpen = false) {
