@@ -1666,6 +1666,20 @@ function formatCleanDate(dateStr) {
     return dateStr.split('T')[0];
 }
 
+window.toggleDelayDateGroup = function(cleanDate) {
+    const rows = document.querySelectorAll(`.delay-subrow-${cleanDate}`);
+    const toggleBtn = document.getElementById(`toggle-date-${cleanDate}`);
+    if (!rows.length) return;
+
+    const isHidden = rows[0].style.display === 'none';
+    rows.forEach(r => {
+        r.style.display = isHidden ? 'table-row' : 'none';
+    });
+    if (toggleBtn) {
+        toggleBtn.textContent = isHidden ? '▴' : '▾';
+    }
+};
+
 function renderRecentDelaysHTML(logs) {
     if (logs === undefined || logs === null) {
         return `
@@ -1685,48 +1699,74 @@ function renderRecentDelaysHTML(logs) {
         `;
     }
 
-    // Display only the latest entry per day
-    const seenDates = new Set();
-    const latestPerDayLogs = [];
+    // Group logs by clean date
+    const dateGroups = {};
+    const dateOrder = [];
 
-    for (const l of logs) {
+    logs.forEach(l => {
         const cleanDate = formatCleanDate(l.delay_date);
-        if (!seenDates.has(cleanDate)) {
-            seenDates.add(cleanDate);
-            latestPerDayLogs.push({
-                ...l,
-                cleanDate: cleanDate
-            });
+        if (!dateGroups[cleanDate]) {
+            dateGroups[cleanDate] = [];
+            dateOrder.push(cleanDate);
         }
-    }
+        dateGroups[cleanDate].push(l);
+    });
 
     let rowsHTML = '';
-    latestPerDayLogs.forEach(l => {
-        const delayMins = l.delay_minutes || 0;
+    dateOrder.forEach(cleanDate => {
+        const dayLogs = dateGroups[cleanDate];
+        const primary = dayLogs[0];
+        const hasSub = dayLogs.length > 1;
+
+        const delayMins = primary.delay_minutes || 0;
         const color = delayMins > 0 ? '#ef4444' : '#10b981';
         const delayText = delayMins > 0 ? `+${delayMins} min late` : 'On Time';
-        const timePart = l.updated_at ? ` ${escapeHTML(l.updated_at)}` : '';
+        const timePart = primary.updated_at ? ` ${escapeHTML(primary.updated_at)}` : '';
+
+        const dateCellHTML = hasSub ? `
+            <span onclick="toggleDelayDateGroup('${escapeHTML(cleanDate)}')" style="cursor: pointer; text-decoration: underline; color: #00e5ff; font-weight: bold;" title="Click to view all ${dayLogs.length} logs for this date">
+                ${escapeHTML(cleanDate)}${timePart} <span id="toggle-date-${escapeHTML(cleanDate)}" style="font-size: 11px;">▾</span>
+            </span>
+        ` : `${escapeHTML(cleanDate)}${timePart}`;
 
         rowsHTML += `
             <tr style="border-bottom: 1px solid #2a313d;">
-                <td style="padding: 6px 4px; color: #8b949e;">${escapeHTML(l.cleanDate)}${timePart}</td>
+                <td style="padding: 6px 4px; color: #8b949e;">${dateCellHTML}</td>
                 <td style="padding: 6px 4px; color: ${color}; font-weight: bold;">${escapeHTML(delayText)}</td>
-                <td style="padding: 6px 4px; color: #d2a8ff; font-size: 11px;">${escapeHTML(l.last_station || l.position_status || 'In Transit')}</td>
+                <td style="padding: 6px 4px; color: #d2a8ff; font-size: 11px;">${escapeHTML(primary.last_station || primary.position_status || 'In Transit')}</td>
             </tr>
         `;
+
+        if (hasSub) {
+            for (let i = 1; i < dayLogs.length; i++) {
+                const sub = dayLogs[i];
+                const subDelayMins = sub.delay_minutes || 0;
+                const subColor = subDelayMins > 0 ? '#ef4444' : '#10b981';
+                const subDelayText = subDelayMins > 0 ? `+${subDelayMins} min late` : 'On Time';
+                const subTimePart = sub.updated_at ? escapeHTML(sub.updated_at) : '';
+
+                rowsHTML += `
+                    <tr class="delay-subrow-${escapeHTML(cleanDate)}" style="display: none; background: #161b22; border-bottom: 1px dashed #2a313d;">
+                        <td style="padding: 4px 4px 4px 16px; color: #6e7681; font-size: 11px;">↳ ${subTimePart}</td>
+                        <td style="padding: 4px; color: ${subColor}; font-size: 11px; font-weight: bold;">${escapeHTML(subDelayText)}</td>
+                        <td style="padding: 4px; color: #a5d6ff; font-size: 11px;">${escapeHTML(sub.last_station || sub.position_status || 'In Transit')}</td>
+                    </tr>
+                `;
+            }
+        }
     });
 
     return `
         <div class="delay-dist-container" style="margin-top: 12px;">
             <div class="delay-dist-title">
                 <span>📅 Delay Logs (Last 3 Days)</span>
-                <span style="font-size: 10px; color: #8b949e;">(${latestPerDayLogs.length} days)</span>
+                <span style="font-size: 10px; color: #8b949e;">(${dateOrder.length} days recorded)</span>
             </div>
-            <div style="max-height: 160px; overflow-y: auto; margin-top: 8px;">
+            <div style="max-height: 180px; overflow-y: auto; margin-top: 8px;">
                 <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
                     <thead>
                         <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #8b949e;">
-                            <th style="padding: 4px;">Date/Time</th>
+                            <th style="padding: 4px;">Date / Time</th>
                             <th style="padding: 4px;">Delay</th>
                             <th style="padding: 4px;">Location</th>
                         </tr>
