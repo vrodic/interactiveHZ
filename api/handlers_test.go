@@ -120,6 +120,66 @@ func TestGetTrainDetails(t *testing.T) {
 	if details.LastStationName != "Vinkovci" {
 		t.Errorf("Expected Vinkovci, got %s", details.LastStationName)
 	}
+	if details.DelayDistribution != nil {
+		t.Errorf("Expected nil DelayDistribution for train with no history, got %+v", details.DelayDistribution)
+	}
+}
+
+func TestDelayDistributionCalculation(t *testing.T) {
+	srv := setupTestDB(t)
+
+	// Seed historical delay records for train 2010
+	// 5 records: 0 (ontime), 3 (1-5m), 8 (5-10m), 20 (10-30m), 45 (>30m)
+	_, err := srv.db.Exec(`
+		INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station)
+		VALUES ('2010', '2026-10-01', 0, 'Arrived', 's1', 's2'),
+		       ('2010', '2026-10-02', 3, 'Arrived', 's1', 's2'),
+		       ('2010', '2026-10-03', 8, 'Arrived', 's1', 's2'),
+		       ('2010', '2026-10-04', 20, 'Arrived', 's1', 's2'),
+		       ('2010', '2026-10-05', 45, 'Arrived', 's1', 's2');
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert historical delays: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/trains/2010", nil)
+	w := httptest.NewRecorder()
+
+	srv.GetTrainDetails(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK, got %d", res.StatusCode)
+	}
+
+	var details TrainDetails
+	if err := json.NewDecoder(res.Body).Decode(&details); err != nil {
+		t.Fatalf("Failed to decode train details response: %v", err)
+	}
+
+	if details.DelayDistribution == nil {
+		t.Fatalf("Expected non-nil DelayDistribution")
+	}
+
+	dist := details.DelayDistribution
+	if dist.TotalRecords != 5 {
+		t.Errorf("Expected 5 total records, got %d", dist.TotalRecords)
+	}
+	if dist.OnTimePercent != 20.0 {
+		t.Errorf("Expected 20%% ontime, got %f", dist.OnTimePercent)
+	}
+	if dist.Late1To5Percent != 20.0 {
+		t.Errorf("Expected 20%% 1-5m, got %f", dist.Late1To5Percent)
+	}
+	if dist.Late5To10Percent != 20.0 {
+		t.Errorf("Expected 20%% 5-10m, got %f", dist.Late5To10Percent)
+	}
+	if dist.Late10To30Percent != 20.0 {
+		t.Errorf("Expected 20%% 10-30m, got %f", dist.Late10To30Percent)
+	}
+	if dist.LateOver30Percent != 20.0 {
+		t.Errorf("Expected 20%% >30m, got %f", dist.LateOver30Percent)
+	}
 }
 
 func TestGetActiveTrains(t *testing.T) {

@@ -92,21 +92,31 @@ type ActiveTrain struct {
 	Path             []LatLon `json:"path,omitempty"`
 }
 
+type DelayDistribution struct {
+	TotalRecords      int     `json:"total_records"`
+	OnTimePercent     float64 `json:"ontime_percent"`
+	Late1To5Percent   float64 `json:"late_1_to_5_percent"`
+	Late5To10Percent  float64 `json:"late_5_to_10_percent"`
+	Late10To30Percent float64 `json:"late_10_to_30_percent"`
+	LateOver30Percent float64 `json:"late_over_30_percent"`
+}
+
 type TrainDetails struct {
-	TrainNumber           string  `json:"train_number"`
-	TripID                string  `json:"trip_id"`
-	Headsign              string  `json:"headsign"`
-	FirstStationName      string  `json:"first_station_name"`
-	LastStationName       string  `json:"last_station_name"`
-	FirstDepartureTime    string  `json:"first_departure_time"`
-	LastArrivalTime       string  `json:"last_arrival_time"`
-	FirstDepartureSeconds int     `json:"first_departure_seconds"`
-	LastArrivalSeconds    int     `json:"last_arrival_seconds"`
-	DelayMinutes          int     `json:"delay_minutes"`
-	PositionStatus        string  `json:"position_status,omitempty"`
-	IsActive              bool    `json:"is_active"`
-	Lat                   float64 `json:"lat,omitempty"`
-	Lon                   float64 `json:"lon,omitempty"`
+	TrainNumber           string             `json:"train_number"`
+	TripID                string             `json:"trip_id"`
+	Headsign              string             `json:"headsign"`
+	FirstStationName      string             `json:"first_station_name"`
+	LastStationName       string             `json:"last_station_name"`
+	FirstDepartureTime    string             `json:"first_departure_time"`
+	LastArrivalTime       string             `json:"last_arrival_time"`
+	FirstDepartureSeconds int                `json:"first_departure_seconds"`
+	LastArrivalSeconds    int                `json:"last_arrival_seconds"`
+	DelayMinutes          int                `json:"delay_minutes"`
+	PositionStatus        string             `json:"position_status,omitempty"`
+	IsActive              bool               `json:"is_active"`
+	Lat                   float64            `json:"lat,omitempty"`
+	Lon                   float64            `json:"lon,omitempty"`
+	DelayDistribution     *DelayDistribution `json:"delay_distribution,omitempty"`
 }
 
 type TrainSegmentSpeed struct {

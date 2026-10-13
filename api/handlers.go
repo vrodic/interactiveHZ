@@ -703,8 +703,56 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	details.DelayDistribution = s.computeDelayDistribution(trainNum)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(details)
+}
+
+func (s *Server) computeDelayDistribution(trainNum string) *DelayDistribution {
+	rows, err := s.db.Query(`
+		SELECT delay_minutes
+		FROM historical_train_delays
+		WHERE train_number = ?
+	`, trainNum)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var total, onTime, late1To5, late5To10, late10To30, lateOver30 int
+	for rows.Next() {
+		var dm int
+		if err := rows.Scan(&dm); err != nil {
+			continue
+		}
+		total++
+		if dm <= 0 {
+			onTime++
+		} else if dm <= 5 {
+			late1To5++
+		} else if dm <= 10 {
+			late5To10++
+		} else if dm <= 30 {
+			late10To30++
+		} else {
+			lateOver30++
+		}
+	}
+
+	if total == 0 {
+		return nil
+	}
+
+	t := float64(total)
+	return &DelayDistribution{
+		TotalRecords:      total,
+		OnTimePercent:     (float64(onTime) / t) * 100.0,
+		Late1To5Percent:   (float64(late1To5) / t) * 100.0,
+		Late5To10Percent:  (float64(late5To10) / t) * 100.0,
+		Late10To30Percent: (float64(late10To30) / t) * 100.0,
+		LateOver30Percent: (float64(lateOver30) / t) * 100.0,
+	}
 }
 
 func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {

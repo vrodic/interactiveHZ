@@ -18,25 +18,26 @@ let selectedStationId = null;
 let selectedTrainPollTimer = null;
 let selectedTrainLastStation = null;
 let selectedTrainLastNextStation = null;
+let selectedTrainLastDelay = null;
 
 function showToast(title, body, isStationChange = false) {
     const container = document.getElementById('toast-container');
-    if (!container) return;
+    if (container) {
+        const toast = document.createElement('div');
+        toast.className = `toast-notification ${isStationChange ? 'station-change' : ''}`;
+        toast.innerHTML = `
+            <div class="toast-title">${escapeHTML(title)}</div>
+            <div class="toast-body">${escapeHTML(body)}</div>
+        `;
 
-    const toast = document.createElement('div');
-    toast.className = `toast-notification ${isStationChange ? 'station-change' : ''}`;
-    toast.innerHTML = `
-        <div class="toast-title">${escapeHTML(title)}</div>
-        <div class="toast-body">${escapeHTML(body)}</div>
-    `;
+        container.appendChild(toast);
 
-    container.appendChild(toast);
-
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transition = 'opacity 0.3s ease';
-        setTimeout(() => toast.remove(), 300);
-    }, 5000);
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transition = 'opacity 0.3s ease';
+            setTimeout(() => toast.remove(), 300);
+        }, 5000);
+    }
 
     if ("Notification" in window && Notification.permission === "granted") {
         try {
@@ -47,6 +48,30 @@ function showToast(title, body, isStationChange = false) {
         } catch (e) {
             console.error('Browser Notification error:', e);
         }
+    }
+}
+
+function updateNotificationButtonUI() {
+    const btn = document.getElementById('enable-notifs-btn');
+    const label = document.getElementById('enable-notifs-label');
+    if (!btn || !label) return;
+
+    if ("Notification" in window) {
+        if (Notification.permission === "granted") {
+            label.textContent = "Notifs Active";
+            btn.style.borderColor = "#10b981";
+            btn.style.color = "#10b981";
+        } else if (Notification.permission === "denied") {
+            label.textContent = "Notifs Blocked";
+            btn.style.borderColor = "#ef4444";
+            btn.style.color = "#ef4444";
+        } else {
+            label.textContent = "Enable Notifs";
+            btn.style.borderColor = "";
+            btn.style.color = "";
+        }
+    } else {
+        label.textContent = "Notifs Unsupported";
     }
 }
 
@@ -67,10 +92,6 @@ function updateDelayStatsUI(stats) {
 
 function startAcceleratedPollingForSelectedTrain(trainNum) {
     stopAcceleratedPollingForSelectedTrain();
-
-    if ("Notification" in window && Notification.permission === "default") {
-        Notification.requestPermission();
-    }
 
     const poll = async () => {
         if (selectedTrainNum !== trainNum) return;
@@ -97,6 +118,7 @@ function stopAcceleratedPollingForSelectedTrain() {
     }
     selectedTrainLastStation = null;
     selectedTrainLastNextStation = null;
+    selectedTrainLastDelay = null;
 }
 
 function checkStationChangeAndNotify(trainNum, delayData) {
@@ -104,16 +126,33 @@ function checkStationChangeAndNotify(trainNum, delayData) {
     const nextStation = delayData.nextStation || delayData.next_station || '';
     const posStatus = delayData.positionStatus || delayData.position_status || '';
 
-    if (!lastStation) return;
+    let delayVal = null;
+    if (delayData.delayMinutes !== undefined && delayData.delayMinutes !== null) {
+        delayVal = delayData.delayMinutes;
+    } else if (delayData.delay_minutes !== undefined && delayData.delay_minutes !== null) {
+        delayVal = delayData.delay_minutes;
+    }
 
-    if (selectedTrainLastStation !== null && selectedTrainLastStation !== lastStation) {
+    // 1. Check Station Transition
+    if (lastStation && selectedTrainLastStation !== null && selectedTrainLastStation !== lastStation) {
         const title = `🚆 Train ${trainNum} Station Update`;
         const body = `Train ${trainNum} reached station: ${lastStation} (Status: ${posStatus || 'In Transit'}${nextStation ? ', Next: ' + nextStation : ''})`;
         showToast(title, body, true);
     }
 
-    selectedTrainLastStation = lastStation;
-    selectedTrainLastNextStation = nextStation;
+    // 2. Check Delay Changes
+    if (delayVal !== null && selectedTrainLastDelay !== null && selectedTrainLastDelay !== delayVal) {
+        const diff = delayVal - selectedTrainLastDelay;
+        const diffStr = diff > 0 ? `+${diff}m increase` : `${diff}m decrease`;
+        const delayStr = delayVal > 0 ? `+${delayVal} min delay` : 'On Time';
+        const title = `⚠️ Train ${trainNum} Delay Update`;
+        const body = `Train ${trainNum} delay status updated: ${delayStr} (${diffStr}). Current location: ${lastStation || 'In Transit'}.`;
+        showToast(title, body, false);
+    }
+
+    if (lastStation) selectedTrainLastStation = lastStation;
+    if (nextStation) selectedTrainLastNextStation = nextStation;
+    if (delayVal !== null) selectedTrainLastDelay = delayVal;
 }
 
 let currentTimeSec = getCurrentSecondsOfDay();
@@ -737,6 +776,28 @@ function initNavHandlers() {
     document.getElementById('close-delays-stream-modal').addEventListener('click', () => {
         delaysStreamModal.style.display = 'none';
     });
+
+    const enableNotifsBtn = document.getElementById('enable-notifs-btn');
+    if (enableNotifsBtn) {
+        enableNotifsBtn.addEventListener('click', async () => {
+            if ("Notification" in window) {
+                try {
+                    const perm = await Notification.requestPermission();
+                    updateNotificationButtonUI();
+                    if (perm === "granted") {
+                        showToast("🔔 Notifications Enabled", "You will now receive desktop notifications for train delay updates and station changes.");
+                    } else if (perm === "denied") {
+                        alert("Notifications are blocked in your browser settings. Please enable notifications for this site to receive updates.");
+                    }
+                } catch (e) {
+                    console.error("Failed to request notification permission:", e);
+                }
+            } else {
+                alert("Desktop notifications are not supported by your browser.");
+            }
+        });
+        updateNotificationButtonUI();
+    }
 
     const toggleSpeedsBtn = document.getElementById('toggle-speeds-btn');
     const toggleSpeedsLabel = document.getElementById('toggle-speeds-label');
@@ -1520,6 +1581,7 @@ async function fetchAndDisplayTrainDetails(trainNum) {
             </div>
             <button class="refresh-delay-btn" id="check-delay-btn">📡 Refresh Live Delay Status</button>
             <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;"></div>
+            <div id="delay-distribution-section">${renderDelayDistributionHTML(data.delay_distribution)}</div>
         `;
 
         if (data.is_active && data.lat && data.lon) {
@@ -1556,6 +1618,51 @@ async function fetchAndDisplayTrainDetails(trainNum) {
     } catch (err) {
         content.innerHTML = `<p style="color: #ef4444; text-align: center; padding: 20px;">Failed to load train details: ${escapeHTML(err.message)}</p>`;
     }
+}
+
+function renderDelayDistributionHTML(dist) {
+    if (!dist || !dist.total_records || dist.total_records === 0) {
+        return `
+            <div class="delay-dist-container">
+                <div class="delay-dist-title">📊 Historical Punctuality Breakdown</div>
+                <div class="delay-dist-empty">No historical delay data available yet</div>
+            </div>
+        `;
+    }
+
+    const items = [
+        { label: 'On time (0 min delay)', pct: dist.ontime_percent || 0, color: '#10b981' },
+        { label: '1–5 min late', pct: dist.late_1_to_5_percent || 0, color: '#38bdf8' },
+        { label: '5–10 min late', pct: dist.late_5_to_10_percent || 0, color: '#f59e0b' },
+        { label: '10–30 min late', pct: dist.late_10_to_30_percent || 0, color: '#f97316' },
+        { label: '>30 min late', pct: dist.late_over_30_percent || 0, color: '#ef4444' }
+    ];
+
+    let itemsHTML = '';
+    items.forEach(it => {
+        const pctFormatted = it.pct.toFixed(1);
+        itemsHTML += `
+            <div class="delay-dist-item">
+                <div class="delay-dist-header">
+                    <span>${escapeHTML(it.label)}</span>
+                    <strong style="color: ${it.color};">${pctFormatted}%</strong>
+                </div>
+                <div class="delay-dist-track">
+                    <div class="delay-dist-fill" style="width: ${pctFormatted}%; background: ${it.color};"></div>
+                </div>
+            </div>
+        `;
+    });
+
+    return `
+        <div class="delay-dist-container">
+            <div class="delay-dist-title">
+                <span>📊 Historical Punctuality Breakdown</span>
+                <span style="font-size: 10px; color: #8b949e;">(${dist.total_records} logs)</span>
+            </div>
+            ${itemsHTML}
+        </div>
+    `;
 }
 
 function updateTrainDetailsPanel(train, isNewOpen = false) {
@@ -1606,9 +1713,25 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         </div>
         <button class="refresh-delay-btn" id="check-delay-btn">📡 Refresh Live Delay Status</button>
         <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;">${liveResultHTML}</div>
+        <div id="delay-distribution-section">${renderDelayDistributionHTML(train.delay_distribution)}</div>
     `;
 
     panel.style.display = 'block';
+
+    if (!train.delay_distribution) {
+        fetch(`/api/trains/${encodeURIComponent(train.train_number)}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data && data.delay_distribution) {
+                    train.delay_distribution = data.delay_distribution;
+                    const distSection = document.getElementById('delay-distribution-section');
+                    if (distSection) {
+                        distSection.innerHTML = renderDelayDistributionHTML(data.delay_distribution);
+                    }
+                }
+            })
+            .catch(e => console.error("Failed to load delay distribution:", e));
+    }
 
     document.getElementById('check-delay-btn').addEventListener('click', async () => {
         const resultDiv = document.getElementById('live-delay-result');
