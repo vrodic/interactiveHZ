@@ -92,6 +92,13 @@
                     </div>
                 </div>
                 <div class="modal-body">
+                    <div id="delay-service-stats-panel" style="background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; display: flex; gap: 16px; flex-wrap: wrap; justify-content: space-between; font-size: 12px;">
+                        <div><strong>Total API Calls:</strong> <span id="ds-total-calls" style="color: #00e5ff;">0</span></div>
+                        <div><strong>Calls/Min:</strong> <span id="ds-calls-min" style="color: #3fb950;">0</span></div>
+                        <div><strong>Calls/Hour:</strong> <span id="ds-calls-hour" style="color: #d2a8ff;">0</span></div>
+                        <div><strong>Success/Fail:</strong> <span id="ds-success-fail" style="color: #e6edf3;">0/0</span></div>
+                        <div><strong>Last Call:</strong> <span id="ds-last-time" style="color: #8b949e;">Never</span></div>
+                    </div>
                     <p style="font-size: 13px; color: #a0aec0; margin-bottom: 12px;">Live feed streaming train delay updates, background polling activity, and status changes in real time.</p>
                     <div id="delays-stream-log" style="background: #0d1117; border: 1px solid #2a313d; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
                         <div style="color: #6e7681;">[System] Connecting to real-time delay event stream...</div>
@@ -152,6 +159,7 @@
         </div>
     </div>
 
+    <div id="toast-container"></div>
     <script src="/app.js"></script>
 </body>
 </html>

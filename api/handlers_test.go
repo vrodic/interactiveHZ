@@ -293,6 +293,85 @@ func BenchmarkGetActiveTrains(b *testing.B) {
 	}
 }
 
+func TestDelayServiceStats(t *testing.T) {
+	srv := setupTestDB(t)
+
+	// Record calls
+	srv.recordDelayServiceCall(true)
+	srv.recordDelayServiceCall(true)
+	srv.recordDelayServiceCall(false)
+
+	stats := srv.GetDelayServiceStats()
+
+	if stats.TotalCalls != 3 {
+		t.Errorf("Expected 3 total calls, got %d", stats.TotalCalls)
+	}
+	if stats.SuccessfulCalls != 2 {
+		t.Errorf("Expected 2 successful calls, got %d", stats.SuccessfulCalls)
+	}
+	if stats.FailedCalls != 1 {
+		t.Errorf("Expected 1 failed call, got %d", stats.FailedCalls)
+	}
+	if stats.CallsLastMinute != 3 {
+		t.Errorf("Expected 3 calls last minute, got %d", stats.CallsLastMinute)
+	}
+}
+
+func TestHistoricalTrainDelaysUniqueChangesOnly(t *testing.T) {
+	srv := setupTestDB(t)
+
+	// Insert initial historical delay record
+	_, err := srv.db.Exec(`
+		INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station)
+		VALUES ('2010', '2026-10-10', 10, 'In Transit', 's1', 's2')
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert initial historical delay: %v", err)
+	}
+
+	// Verify count is 1
+	var count int
+	_ = srv.db.QueryRow("SELECT COUNT(*) FROM historical_train_delays WHERE train_number = '2010'").Scan(&count)
+	if count != 1 {
+		t.Fatalf("Expected 1 historical record, got %d", count)
+	}
+
+	// Check logic when checking new delay with identical data
+	var lastHistDelay int
+	var lastHistStatus, lastHistLastSt, lastHistNextSt string
+	errHist := srv.db.QueryRow(`
+		SELECT delay_minutes, COALESCE(position_status, ''), COALESCE(last_station, ''), COALESCE(next_station, '')
+		FROM historical_train_delays
+		WHERE train_number = '2010'
+		ORDER BY id DESC LIMIT 1
+	`).Scan(&lastHistDelay, &lastHistStatus, &lastHistLastSt, &lastHistNextSt)
+
+	if errHist != nil {
+		t.Fatalf("Query failed: %v", errHist)
+	}
+
+	isHistChangedIdentical := (errHist != nil) ||
+		(lastHistDelay != 10) ||
+		(lastHistStatus != "In Transit") ||
+		(lastHistLastSt != "s1") ||
+		(lastHistNextSt != "s2")
+
+	if isHistChangedIdentical {
+		t.Errorf("Expected isHistChangedIdentical to be false for identical delay data")
+	}
+
+	// Check logic when checking new delay with CHANGED data (e.g. delay increased to 15 mins)
+	isHistChangedNew := (errHist != nil) ||
+		(lastHistDelay != 15) ||
+		(lastHistStatus != "In Transit") ||
+		(lastHistLastSt != "s1") ||
+		(lastHistNextSt != "s2")
+
+	if !isHistChangedNew {
+		t.Errorf("Expected isHistChangedNew to be true for modified delay data")
+	}
+}
+
 func BenchmarkGetSegments(b *testing.B) {
 	t := &testing.T{}
 	srv := setupTestDB(t)

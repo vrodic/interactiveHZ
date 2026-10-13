@@ -59,19 +59,84 @@ type cachedDelay struct {
 }
 
 type Server struct {
-	db            *sql.DB
-	osmGraph      *OSMGraph
-	delayCache    sync.Map
-	routeCache    sync.Map
-	segmentsCache []SegmentSpeed
-	segmentsMu    sync.RWMutex
-	broadcaster   *Broadcaster
+	db                  *sql.DB
+	osmGraph            *OSMGraph
+	delayCache          sync.Map
+	routeCache          sync.Map
+	segmentsCache       []SegmentSpeed
+	segmentsMu          sync.RWMutex
+	broadcaster         *Broadcaster
+	delayStatsMu        sync.Mutex
+	delayTotalCalls     int64
+	delaySuccessCalls   int64
+	delayFailedCalls    int64
+	delayLastCallTime   time.Time
+	delayCallHistory    []time.Time
 }
 
 func NewServer(db *sql.DB) *Server {
 	return &Server{
 		db:          db,
 		broadcaster: NewBroadcaster(),
+	}
+}
+
+func (s *Server) recordDelayServiceCall(success bool) {
+	s.delayStatsMu.Lock()
+	defer s.delayStatsMu.Unlock()
+
+	now := time.Now()
+	s.delayTotalCalls++
+	if success {
+		s.delaySuccessCalls++
+	} else {
+		s.delayFailedCalls++
+	}
+	s.delayLastCallTime = now
+	s.delayCallHistory = append(s.delayCallHistory, now)
+
+	cutoff := now.Add(-1 * time.Hour)
+	idx := 0
+	for idx < len(s.delayCallHistory) && s.delayCallHistory[idx].Before(cutoff) {
+		idx++
+	}
+	if idx > 0 {
+		s.delayCallHistory = s.delayCallHistory[idx:]
+	}
+}
+
+func (s *Server) GetDelayServiceStats() DelayServiceStats {
+	s.delayStatsMu.Lock()
+	defer s.delayStatsMu.Unlock()
+
+	now := time.Now()
+	oneMinAgo := now.Add(-1 * time.Minute)
+	oneHourAgo := now.Add(-1 * time.Hour)
+
+	callsMin := 0
+	callsHour := 0
+
+	for _, t := range s.delayCallHistory {
+		if t.After(oneMinAgo) {
+			callsMin++
+		}
+		if t.After(oneHourAgo) {
+			callsHour++
+		}
+	}
+
+	lastCallStr := ""
+	if !s.delayLastCallTime.IsZero() {
+		lastCallStr = getZagrebTime().Format("15:04:05")
+	}
+
+	return DelayServiceStats{
+		TotalCalls:      s.delayTotalCalls,
+		SuccessfulCalls: s.delaySuccessCalls,
+		FailedCalls:     s.delayFailedCalls,
+		CallsLastMinute: callsMin,
+		CallsLastHour:   callsHour,
+		LastCallTime:    lastCallStr,
 	}
 }
 
@@ -921,6 +986,7 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 
 	resp, err := client.Get(url)
 	if err != nil {
+		s.recordDelayServiceCall(false)
 		if cached, ok := s.delayCache.Load(trainID); ok {
 			c := cached.(cachedDelay)
 			return &c.response, nil
@@ -931,11 +997,13 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		s.recordDelayServiceCall(false)
 		return nil, err
 	}
 
 	var delayResp DelayAPIResponse
 	if err := json.Unmarshal(body, &delayResp); err == nil && delayResp.Success {
+		s.recordDelayServiceCall(true)
 		s.delayCache.Store(trainID, cachedDelay{
 			response:  delayResp,
 			timestamp: time.Now(),
@@ -970,11 +1038,20 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 		}
 
 		if isActiveTrain {
-			var prevDelay int
-			var prevStatus string
-			errPrev := s.db.QueryRow("SELECT delay_minutes, COALESCE(position_status, '') FROM train_delays WHERE train_number = ?", trainID).Scan(&prevDelay, &prevStatus)
+			var lastHistDelay int
+			var lastHistStatus, lastHistLastSt, lastHistNextSt string
+			errHist := s.db.QueryRow(`
+				SELECT delay_minutes, COALESCE(position_status, ''), COALESCE(last_station, ''), COALESCE(next_station, '')
+				FROM historical_train_delays
+				WHERE train_number = ?
+				ORDER BY id DESC LIMIT 1
+			`, trainID).Scan(&lastHistDelay, &lastHistStatus, &lastHistLastSt, &lastHistNextSt)
 
-			isChanged := (errPrev != nil) || (prevDelay != delayMins) || (prevStatus != delayResp.Data.PositionStatus)
+			isHistChanged := (errHist != nil) ||
+				(lastHistDelay != delayMins) ||
+				(lastHistStatus != delayResp.Data.PositionStatus) ||
+				(lastHistLastSt != delayResp.Data.LastStation) ||
+				(lastHistNextSt != nextSt)
 
 			_, _ = s.db.Exec(`
 				INSERT INTO train_delays (train_number, delay_minutes, position_status, last_station, next_station, updated_at)
@@ -987,7 +1064,7 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 					updated_at=CURRENT_TIMESTAMP
 			`, trainID, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
 
-			if isChanged {
+			if isHistChanged {
 				_, _ = s.db.Exec(`
 					INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
 					VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -995,13 +1072,14 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 			}
 
 			eventJSON, _ := json.Marshal(map[string]interface{}{
-				"type":            "delay_update",
-				"train_number":    trainID,
-				"delay_minutes":   delayMins,
-				"position_status": delayResp.Data.PositionStatus,
-				"last_station":    delayResp.Data.LastStation,
-				"next_station":    nextSt,
-				"timestamp":       getZagrebTime().Format("15:04:05"),
+				"type":                "delay_update",
+				"train_number":        trainID,
+				"delay_minutes":       delayMins,
+				"position_status":     delayResp.Data.PositionStatus,
+				"last_station":        delayResp.Data.LastStation,
+				"next_station":        nextSt,
+				"timestamp":           getZagrebTime().Format("15:04:05"),
+				"delay_service_stats": s.GetDelayServiceStats(),
 			})
 			s.broadcaster.Broadcast(string(eventJSON))
 		}
@@ -1027,9 +1105,10 @@ func (s *Server) StreamDelays(w http.ResponseWriter, r *http.Request) {
 	defer s.broadcaster.Unsubscribe(ch)
 
 	initJSON, _ := json.Marshal(map[string]interface{}{
-		"type":      "connected",
-		"message":   "Connected to HŽ real-time delay update stream",
-		"timestamp": getZagrebTime().Format("15:04:05"),
+		"type":                "connected",
+		"message":             "Connected to HŽ real-time delay update stream",
+		"timestamp":           getZagrebTime().Format("15:04:05"),
+		"delay_service_stats": s.GetDelayServiceStats(),
 	})
 	fmt.Fprintf(w, "data: %s\n\n", initJSON)
 	flusher.Flush()
@@ -1359,6 +1438,9 @@ func (s *Server) GetDashboardStats(w http.ResponseWriter, r *http.Request) {
 		stats.AvgDelayMinutes = float64(totalDelay) / float64(stats.DelayedTrainCount)
 	}
 	stats.RecentDelayedTrains = recentDelayed
+
+	dsStats := s.GetDelayServiceStats()
+	stats.DelayServiceStats = &dsStats
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)

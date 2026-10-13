@@ -15,6 +15,107 @@ let selectedTrainRouteLayer = null;
 let selectedStationHighlightLayer = null;
 let selectedStationId = null;
 
+let selectedTrainPollTimer = null;
+let selectedTrainLastStation = null;
+let selectedTrainLastNextStation = null;
+
+function showToast(title, body, isStationChange = false) {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+
+    const toast = document.createElement('div');
+    toast.className = `toast-notification ${isStationChange ? 'station-change' : ''}`;
+    toast.innerHTML = `
+        <div class="toast-title">${escapeHTML(title)}</div>
+        <div class="toast-body">${escapeHTML(body)}</div>
+    `;
+
+    container.appendChild(toast);
+
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 0.3s ease';
+        setTimeout(() => toast.remove(), 300);
+    }, 5000);
+
+    if ("Notification" in window && Notification.permission === "granted") {
+        try {
+            new Notification(title, {
+                body: body,
+                icon: '/favicon.ico'
+            });
+        } catch (e) {
+            console.error('Browser Notification error:', e);
+        }
+    }
+}
+
+function updateDelayStatsUI(stats) {
+    if (!stats) return;
+    const totalEl = document.getElementById('ds-total-calls');
+    const minEl = document.getElementById('ds-calls-min');
+    const hourEl = document.getElementById('ds-calls-hour');
+    const sfEl = document.getElementById('ds-success-fail');
+    const lastEl = document.getElementById('ds-last-time');
+
+    if (totalEl) totalEl.textContent = stats.total_calls || 0;
+    if (minEl) minEl.textContent = stats.calls_last_minute || 0;
+    if (hourEl) hourEl.textContent = stats.calls_last_hour || 0;
+    if (sfEl) sfEl.textContent = `${stats.successful_calls || 0} / ${stats.failed_calls || 0}`;
+    if (lastEl) lastEl.textContent = stats.last_call_time || 'Never';
+}
+
+function startAcceleratedPollingForSelectedTrain(trainNum) {
+    stopAcceleratedPollingForSelectedTrain();
+
+    if ("Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission();
+    }
+
+    const poll = async () => {
+        if (selectedTrainNum !== trainNum) return;
+        try {
+            const resp = await fetch(`/api/train-delay?trainId=${encodeURIComponent(trainNum)}`);
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (data.success && data.data) {
+                checkStationChangeAndNotify(trainNum, data.data);
+            }
+        } catch (e) {
+            console.error('Accelerated delay polling error:', e);
+        }
+    };
+
+    poll();
+    selectedTrainPollTimer = setInterval(poll, 30000);
+}
+
+function stopAcceleratedPollingForSelectedTrain() {
+    if (selectedTrainPollTimer) {
+        clearInterval(selectedTrainPollTimer);
+        selectedTrainPollTimer = null;
+    }
+    selectedTrainLastStation = null;
+    selectedTrainLastNextStation = null;
+}
+
+function checkStationChangeAndNotify(trainNum, delayData) {
+    const lastStation = delayData.lastStation || delayData.last_station || '';
+    const nextStation = delayData.nextStation || delayData.next_station || '';
+    const posStatus = delayData.positionStatus || delayData.position_status || '';
+
+    if (!lastStation) return;
+
+    if (selectedTrainLastStation !== null && selectedTrainLastStation !== lastStation) {
+        const title = `🚆 Train ${trainNum} Station Update`;
+        const body = `Train ${trainNum} reached station: ${lastStation} (Status: ${posStatus || 'In Transit'}${nextStation ? ', Next: ' + nextStation : ''})`;
+        showToast(title, body, true);
+    }
+
+    selectedTrainLastStation = lastStation;
+    selectedTrainLastNextStation = nextStation;
+}
+
 let currentTimeSec = getCurrentSecondsOfDay();
 let isRealtime = true;
 let isPlaying = false;
@@ -294,6 +395,7 @@ function initControls() {
         document.getElementById('side-panel').style.display = 'none';
         currentOpenedTrainNum = null;
         selectedTrainNum = null;
+        stopAcceleratedPollingForSelectedTrain();
         clearSelectedTrainRoute();
         updateTrainMarkersClientSide();
     });
@@ -701,11 +803,19 @@ function initDelaysSSEStream() {
             const data = JSON.parse(event.data);
             appendStreamLog(data);
 
+            if (data.delay_service_stats) {
+                updateDelayStatsUI(data.delay_service_stats);
+            }
+
             if (data.type === 'delay_update') {
                 const tr = activeTrainsData.find(t => t.train_number === data.train_number);
                 if (tr) {
                     tr.delay_minutes = data.delay_minutes;
                     updateTrainMarkersClientSide();
+                }
+
+                if (selectedTrainNum && data.train_number === selectedTrainNum) {
+                    checkStationChangeAndNotify(selectedTrainNum, data);
                 }
             }
         } catch (e) {
@@ -862,6 +972,10 @@ async function openDashboardModal() {
 
         const tripsCount = stats.trips_running_today || stats.total_trips_today || 0;
 
+        const dsStats = stats.delay_service_stats || {};
+        const dsCalls = dsStats.total_calls || 0;
+        const dsMin = dsStats.calls_last_minute || 0;
+
         body.innerHTML = `
             <div class="dashboard-grid">
                 <div class="dash-card">
@@ -879,6 +993,10 @@ async function openDashboardModal() {
                 <div class="dash-card">
                     <div class="dash-label">Trips Running Today</div>
                     <div class="dash-value">${tripsCount}</div>
+                </div>
+                <div class="dash-card">
+                    <div class="dash-label">Delay API Calls (Total/Min)</div>
+                    <div class="dash-value" style="color: #00e5ff;">${dsCalls} <span style="font-size: 14px; color: #a0aec0;">(${dsMin}/min)</span></div>
                 </div>
             </div>
 
@@ -1311,6 +1429,7 @@ function openTrainDetails(train) {
     selectedTrainNum = trNum;
 
     drawSelectedTrainRoute(trNum);
+    startAcceleratedPollingForSelectedTrain(trNum);
 
     const activeTr = activeTrainsData.find(t => t.train_number === trNum || t.trip_id === trNum);
     if (activeTr) {

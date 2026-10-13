@@ -39,15 +39,25 @@ type RoutePlanEntry struct {
 	TransferStationName    string `json:"transfer_station_name,omitempty"`
 }
 
+type DelayServiceStats struct {
+	TotalCalls        int64  `json:"total_calls"`
+	SuccessfulCalls   int64  `json:"successful_calls"`
+	FailedCalls       int64  `json:"failed_calls"`
+	CallsLastMinute   int    `json:"calls_last_minute"`
+	CallsLastHour     int    `json:"calls_last_hour"`
+	LastCallTime      string `json:"last_call_time,omitempty"`
+}
+
 type DashboardStats struct {
-	ActiveTrainCount    int           `json:"active_train_count"`
-	DelayedTrainCount   int           `json:"delayed_train_count"`
-	OnTimeTrainCount    int           `json:"ontime_train_count"`
-	AvgDelayMinutes     float64       `json:"avg_delay_minutes"`
-	MaxDelayMinutes     int           `json:"max_delay_minutes"`
-	TotalStations       int           `json:"total_stations"`
-	TripsRunningToday   int           `json:"trips_running_today"`
-	RecentDelayedTrains []ActiveTrain `json:"recent_delayed_trains"`
+	ActiveTrainCount    int                `json:"active_train_count"`
+	DelayedTrainCount   int                `json:"delayed_train_count"`
+	OnTimeTrainCount    int                `json:"ontime_train_count"`
+	AvgDelayMinutes     float64            `json:"avg_delay_minutes"`
+	MaxDelayMinutes     int                `json:"max_delay_minutes"`
+	TotalStations       int                `json:"total_stations"`
+	TripsRunningToday   int                `json:"trips_running_today"`
+	RecentDelayedTrains []ActiveTrain      `json:"recent_delayed_trains"`
+	DelayServiceStats   *DelayServiceStats `json:"delay_service_stats,omitempty"`
 }
 
 type SearchResultItem struct {
