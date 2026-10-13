@@ -20,6 +20,7 @@ let selectedTrainLastStation = null;
 let selectedTrainLastNextStation = null;
 let selectedTrainLastDelay = null;
 let trainDelayDistributions = {};
+let trainRecentDelays = {};
 
 function showToast(title, body, isStationChange = false) {
     const container = document.getElementById('toast-container');
@@ -253,6 +254,9 @@ function initMap() {
     segmentBadgesLayerGroup.addTo(map);
 
     map.on('zoomend', updateSegmentVisibility);
+    map.on('popupclose', () => {
+        clearSelectedStationHighlight();
+    });
 }
 
 function updateSegmentVisibility() {
@@ -463,7 +467,8 @@ function highlightSelectedStation(st) {
 
     selectedStationHighlightLayer = L.marker([st.lat, st.lon], {
         icon: highlightIcon,
-        zIndexOffset: 1000
+        zIndexOffset: 1000,
+        interactive: false
     }).addTo(map);
 }
 
@@ -550,6 +555,34 @@ function computePathSegmentLength(path) {
         totalDist += d;
     }
     return { totalDist, segs };
+}
+
+function computeRealisticProgress(effTime, depSec, arrSec) {
+    const totalDuration = arrSec - depSec;
+    if (totalDuration <= 0) return 0;
+
+    const elapsed = effTime - depSec;
+    if (elapsed <= 0) return 0;
+    if (elapsed >= totalDuration) return 1;
+
+    // At least 20 seconds dwell time at station stop (or up to 20% for shorter segment durations)
+    const minDwellSec = Math.min(20, totalDuration * 0.2);
+    const motionDuration = totalDuration - minDwellSec;
+
+    if (motionDuration <= 0) {
+        return elapsed < totalDuration ? 0 : 1;
+    }
+
+    if (elapsed >= motionDuration) {
+        // Dwell at the station stop
+        return 1.0;
+    }
+
+    // Normalized progress along motion duration
+    const x = elapsed / motionDuration;
+
+    // Smooth cosine velocity profile (smooth acceleration from stop, smooth deceleration into stop)
+    return (1 - Math.cos(Math.PI * x)) / 2;
 }
 
 function getPointAndBearingOnPath(path, progress) {
@@ -671,9 +704,7 @@ function updateTrainMarkersClientSide() {
 
         let progress = train.progress;
         if (duration > 0) {
-            progress = (effTime - depSec) / duration;
-            if (progress < 0) progress = 0;
-            if (progress > 1) progress = 1;
+            progress = computeRealisticProgress(effTime, depSec, arrSec);
         }
 
         let pos = [train.lat, train.lon];
@@ -1490,6 +1521,8 @@ function openTrainDetails(train) {
     currentOpenedTrainNum = trNum;
     selectedTrainNum = trNum;
 
+    clearSelectedStationHighlight();
+
     drawSelectedTrainRoute(trNum);
     startAcceleratedPollingForSelectedTrain(trNum);
 
@@ -1523,6 +1556,9 @@ async function fetchAndDisplayTrainDetails(trainNum) {
         const data = await resp.json();
         if (data.delay_distribution) {
             trainDelayDistributions[data.train_number] = data.delay_distribution;
+        }
+        if (data.recent_delays) {
+            trainRecentDelays[data.train_number] = data.recent_delays;
         }
 
         let statusStr = "Scheduled Train";
@@ -1625,8 +1661,22 @@ async function fetchAndDisplayTrainDetails(trainNum) {
     }
 }
 
+function formatCleanDate(dateStr) {
+    if (!dateStr) return '';
+    return dateStr.split('T')[0];
+}
+
 function renderRecentDelaysHTML(logs) {
-    if (!logs || logs.length === 0) {
+    if (logs === undefined || logs === null) {
+        return `
+            <div class="delay-dist-container" style="margin-top: 12px;">
+                <div class="delay-dist-title">📅 Delay Logs (Last 3 Days)</div>
+                <div class="delay-dist-empty">Loading delay logs...</div>
+            </div>
+        `;
+    }
+
+    if (!Array.isArray(logs) || logs.length === 0) {
         return `
             <div class="delay-dist-container" style="margin-top: 12px;">
                 <div class="delay-dist-title">📅 Delay Logs (Last 3 Days)</div>
@@ -1635,15 +1685,31 @@ function renderRecentDelaysHTML(logs) {
         `;
     }
 
+    // Display only the latest entry per day
+    const seenDates = new Set();
+    const latestPerDayLogs = [];
+
+    for (const l of logs) {
+        const cleanDate = formatCleanDate(l.delay_date);
+        if (!seenDates.has(cleanDate)) {
+            seenDates.add(cleanDate);
+            latestPerDayLogs.push({
+                ...l,
+                cleanDate: cleanDate
+            });
+        }
+    }
+
     let rowsHTML = '';
-    logs.forEach(l => {
+    latestPerDayLogs.forEach(l => {
         const delayMins = l.delay_minutes || 0;
         const color = delayMins > 0 ? '#ef4444' : '#10b981';
         const delayText = delayMins > 0 ? `+${delayMins} min late` : 'On Time';
+        const timePart = l.updated_at ? ` ${escapeHTML(l.updated_at)}` : '';
 
         rowsHTML += `
             <tr style="border-bottom: 1px solid #2a313d;">
-                <td style="padding: 6px 4px; color: #8b949e;">${escapeHTML(l.delay_date)} ${escapeHTML(l.updated_at || '')}</td>
+                <td style="padding: 6px 4px; color: #8b949e;">${escapeHTML(l.cleanDate)}${timePart}</td>
                 <td style="padding: 6px 4px; color: ${color}; font-weight: bold;">${escapeHTML(delayText)}</td>
                 <td style="padding: 6px 4px; color: #d2a8ff; font-size: 11px;">${escapeHTML(l.last_station || l.position_status || 'In Transit')}</td>
             </tr>
@@ -1654,7 +1720,7 @@ function renderRecentDelaysHTML(logs) {
         <div class="delay-dist-container" style="margin-top: 12px;">
             <div class="delay-dist-title">
                 <span>📅 Delay Logs (Last 3 Days)</span>
-                <span style="font-size: 10px; color: #8b949e;">(${logs.length} entries)</span>
+                <span style="font-size: 10px; color: #8b949e;">(${latestPerDayLogs.length} days)</span>
             </div>
             <div style="max-height: 160px; overflow-y: auto; margin-top: 8px;">
                 <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
@@ -1731,6 +1797,12 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         trainDelayDistributions[trNum] = train.delay_distribution;
     }
 
+    if (!train.recent_delays && trainRecentDelays[trNum]) {
+        train.recent_delays = trainRecentDelays[trNum];
+    } else if (train.recent_delays) {
+        trainRecentDelays[trNum] = train.recent_delays;
+    }
+
     const delayBadge = train.delay_minutes > 0
         ? `<span class="badge badge-delay">+${train.delay_minutes} min delay</span>`
         : `<span class="badge badge-on-time">Active on Route</span>`;
@@ -1796,6 +1868,7 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
                     }
                     if (data.recent_delays) {
                         train.recent_delays = data.recent_delays;
+                        trainRecentDelays[trNum] = data.recent_delays;
                         const recentSection = document.getElementById('recent-delays-section');
                         if (recentSection) {
                             recentSection.innerHTML = renderRecentDelaysHTML(data.recent_delays);
