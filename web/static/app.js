@@ -19,6 +19,7 @@ let selectedTrainPollTimer = null;
 let selectedTrainLastStation = null;
 let selectedTrainLastNextStation = null;
 let selectedTrainLastDelay = null;
+let trainDelayDistributions = {};
 
 function showToast(title, body, isStationChange = false) {
     const container = document.getElementById('toast-container');
@@ -1520,6 +1521,9 @@ async function fetchAndDisplayTrainDetails(trainNum) {
         }
 
         const data = await resp.json();
+        if (data.delay_distribution) {
+            trainDelayDistributions[data.train_number] = data.delay_distribution;
+        }
 
         let statusStr = "Scheduled Train";
         let statusBadgeClass = "badge-on-time";
@@ -1669,6 +1673,14 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
     const panel = document.getElementById('side-panel');
     const content = document.getElementById('panel-content');
 
+    const trNum = train.train_number || train.trip_id;
+
+    if (!train.delay_distribution && trainDelayDistributions[trNum]) {
+        train.delay_distribution = trainDelayDistributions[trNum];
+    } else if (train.delay_distribution) {
+        trainDelayDistributions[trNum] = train.delay_distribution;
+    }
+
     const delayBadge = train.delay_minutes > 0
         ? `<span class="badge badge-delay">+${train.delay_minutes} min delay</span>`
         : `<span class="badge badge-on-time">Active on Route</span>`;
@@ -1719,11 +1731,12 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
     panel.style.display = 'block';
 
     if (!train.delay_distribution) {
-        fetch(`/api/trains/${encodeURIComponent(train.train_number)}`)
+        fetch(`/api/trains/${encodeURIComponent(trNum)}`)
             .then(res => res.json())
             .then(data => {
                 if (data && data.delay_distribution) {
                     train.delay_distribution = data.delay_distribution;
+                    trainDelayDistributions[trNum] = data.delay_distribution;
                     const distSection = document.getElementById('delay-distribution-section');
                     if (distSection) {
                         distSection.innerHTML = renderDelayDistributionHTML(data.delay_distribution);
@@ -1737,7 +1750,7 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         const resultDiv = document.getElementById('live-delay-result');
         resultDiv.innerHTML = '<em>Fetching live status from hzpp.app...</em>';
         try {
-            const resp = await fetch(`/api/train-delay?trainId=${encodeURIComponent(train.train_number)}`);
+            const resp = await fetch(`/api/train-delay?trainId=${encodeURIComponent(trNum)}`);
             const data = await resp.json();
             if (data.success && data.data) {
                 const live = data.data;
@@ -1755,7 +1768,17 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
                     </div>
                 `;
 
-                updateTrainDetailsPanel(train, false);
+                const badgeEl = panel.querySelector('.panel-header .badge');
+                if (badgeEl) {
+                    if (liveDelayMins > 0) {
+                        badgeEl.className = 'badge badge-delay';
+                        badgeEl.textContent = `+${liveDelayMins} min delay`;
+                    } else {
+                        badgeEl.className = 'badge badge-on-time';
+                        badgeEl.textContent = 'Active on Route';
+                    }
+                }
+
                 fetchActiveTrains();
             } else {
                 resultDiv.innerHTML = '<span style="color: #ef4444;">No live status available for this train.</span>';
