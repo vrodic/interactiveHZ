@@ -123,6 +123,45 @@ func TestGetTrainDetails(t *testing.T) {
 	if details.DelayDistribution != nil {
 		t.Errorf("Expected nil DelayDistribution for train with no history, got %+v", details.DelayDistribution)
 	}
+	if len(details.RecentDelays) != 0 {
+		t.Errorf("Expected 0 RecentDelays for train with no history, got %d", len(details.RecentDelays))
+	}
+}
+
+func TestRecentDelaysRetrieval(t *testing.T) {
+	srv := setupTestDB(t)
+
+	_, err := srv.db.Exec(`
+		INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
+		VALUES ('2010', date('now'), 15, 'In Transit', 'Zagreb Glavni Kolodvor', 'Vinkovci', CURRENT_TIMESTAMP),
+		       ('2010', date('now', '-1 day'), 5, 'Arrived', 'Vinkovci', '', datetime('now', '-1 day'));
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert historical delays: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/trains/2010", nil)
+	w := httptest.NewRecorder()
+
+	srv.GetTrainDetails(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK, got %d", res.StatusCode)
+	}
+
+	var details TrainDetails
+	if err := json.NewDecoder(res.Body).Decode(&details); err != nil {
+		t.Fatalf("Failed to decode train details response: %v", err)
+	}
+
+	if len(details.RecentDelays) != 2 {
+		t.Fatalf("Expected 2 RecentDelays records in last 3 days, got %d", len(details.RecentDelays))
+	}
+
+	if details.RecentDelays[0].DelayMinutes != 15 {
+		t.Errorf("Expected latest delay to be 15 mins, got %d", details.RecentDelays[0].DelayMinutes)
+	}
 }
 
 func TestDelayDistributionCalculation(t *testing.T) {

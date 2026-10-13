@@ -704,9 +704,33 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	details.DelayDistribution = s.computeDelayDistribution(trainNum)
+	details.RecentDelays = s.getRecentDelays(trainNum)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(details)
+}
+
+func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
+	rows, err := s.db.Query(`
+		SELECT delay_date, delay_minutes, COALESCE(position_status, ''), COALESCE(last_station, ''), strftime('%H:%M', updated_at)
+		FROM historical_train_delays
+		WHERE train_number = ? AND updated_at >= datetime('now', '-3 days')
+		ORDER BY updated_at DESC, id DESC
+		LIMIT 20
+	`, trainNum)
+	if err != nil {
+		return []RecentDelayLog{}
+	}
+	defer rows.Close()
+
+	logs := make([]RecentDelayLog, 0)
+	for rows.Next() {
+		var l RecentDelayLog
+		if err := rows.Scan(&l.DelayDate, &l.DelayMinutes, &l.PositionStatus, &l.LastStation, &l.UpdatedAt); err == nil {
+			logs = append(logs, l)
+		}
+	}
+	return logs
 }
 
 func (s *Server) computeDelayDistribution(trainNum string) *DelayDistribution {

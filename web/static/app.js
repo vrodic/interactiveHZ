@@ -1586,6 +1586,7 @@ async function fetchAndDisplayTrainDetails(trainNum) {
             <button class="refresh-delay-btn" id="check-delay-btn">📡 Refresh Live Delay Status</button>
             <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;"></div>
             <div id="delay-distribution-section">${renderDelayDistributionHTML(data.delay_distribution)}</div>
+            <div id="recent-delays-section">${renderRecentDelaysHTML(data.recent_delays)}</div>
         `;
 
         if (data.is_active && data.lat && data.lon) {
@@ -1622,6 +1623,55 @@ async function fetchAndDisplayTrainDetails(trainNum) {
     } catch (err) {
         content.innerHTML = `<p style="color: #ef4444; text-align: center; padding: 20px;">Failed to load train details: ${escapeHTML(err.message)}</p>`;
     }
+}
+
+function renderRecentDelaysHTML(logs) {
+    if (!logs || logs.length === 0) {
+        return `
+            <div class="delay-dist-container" style="margin-top: 12px;">
+                <div class="delay-dist-title">📅 Delay Logs (Last 3 Days)</div>
+                <div class="delay-dist-empty">No delay logs recorded in the last 3 days</div>
+            </div>
+        `;
+    }
+
+    let rowsHTML = '';
+    logs.forEach(l => {
+        const delayMins = l.delay_minutes || 0;
+        const color = delayMins > 0 ? '#ef4444' : '#10b981';
+        const delayText = delayMins > 0 ? `+${delayMins} min late` : 'On Time';
+
+        rowsHTML += `
+            <tr style="border-bottom: 1px solid #2a313d;">
+                <td style="padding: 6px 4px; color: #8b949e;">${escapeHTML(l.delay_date)} ${escapeHTML(l.updated_at || '')}</td>
+                <td style="padding: 6px 4px; color: ${color}; font-weight: bold;">${escapeHTML(delayText)}</td>
+                <td style="padding: 6px 4px; color: #d2a8ff; font-size: 11px;">${escapeHTML(l.last_station || l.position_status || 'In Transit')}</td>
+            </tr>
+        `;
+    });
+
+    return `
+        <div class="delay-dist-container" style="margin-top: 12px;">
+            <div class="delay-dist-title">
+                <span>📅 Delay Logs (Last 3 Days)</span>
+                <span style="font-size: 10px; color: #8b949e;">(${logs.length} entries)</span>
+            </div>
+            <div style="max-height: 160px; overflow-y: auto; margin-top: 8px;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #8b949e;">
+                            <th style="padding: 4px;">Date/Time</th>
+                            <th style="padding: 4px;">Delay</th>
+                            <th style="padding: 4px;">Location</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rowsHTML}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
 }
 
 function renderDelayDistributionHTML(dist) {
@@ -1726,24 +1776,34 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         <button class="refresh-delay-btn" id="check-delay-btn">📡 Refresh Live Delay Status</button>
         <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;">${liveResultHTML}</div>
         <div id="delay-distribution-section">${renderDelayDistributionHTML(train.delay_distribution)}</div>
+        <div id="recent-delays-section">${renderRecentDelaysHTML(train.recent_delays)}</div>
     `;
 
     panel.style.display = 'block';
 
-    if (!train.delay_distribution) {
+    if (!train.delay_distribution || !train.recent_delays) {
         fetch(`/api/trains/${encodeURIComponent(trNum)}`)
             .then(res => res.json())
             .then(data => {
-                if (data && data.delay_distribution) {
-                    train.delay_distribution = data.delay_distribution;
-                    trainDelayDistributions[trNum] = data.delay_distribution;
-                    const distSection = document.getElementById('delay-distribution-section');
-                    if (distSection) {
-                        distSection.innerHTML = renderDelayDistributionHTML(data.delay_distribution);
+                if (data) {
+                    if (data.delay_distribution) {
+                        train.delay_distribution = data.delay_distribution;
+                        trainDelayDistributions[trNum] = data.delay_distribution;
+                        const distSection = document.getElementById('delay-distribution-section');
+                        if (distSection) {
+                            distSection.innerHTML = renderDelayDistributionHTML(data.delay_distribution);
+                        }
+                    }
+                    if (data.recent_delays) {
+                        train.recent_delays = data.recent_delays;
+                        const recentSection = document.getElementById('recent-delays-section');
+                        if (recentSection) {
+                            recentSection.innerHTML = renderRecentDelaysHTML(data.recent_delays);
+                        }
                     }
                 }
             })
-            .catch(e => console.error("Failed to load delay distribution:", e));
+            .catch(e => console.error("Failed to load train details:", e));
     }
 
     document.getElementById('check-delay-btn').addEventListener('click', async () => {

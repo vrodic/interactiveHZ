@@ -101,6 +101,14 @@ type DelayDistribution struct {
 	LateOver30Percent float64 `json:"late_over_30_percent"`
 }
 
+type RecentDelayLog struct {
+	DelayDate      string `json:"delay_date"`
+	DelayMinutes   int    `json:"delay_minutes"`
+	PositionStatus string `json:"position_status,omitempty"`
+	LastStation    string `json:"last_station,omitempty"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
 type TrainDetails struct {
 	TrainNumber           string             `json:"train_number"`
 	TripID                string             `json:"trip_id"`
@@ -117,6 +125,7 @@ type TrainDetails struct {
 	Lat                   float64            `json:"lat,omitempty"`
 	Lon                   float64            `json:"lon,omitempty"`
 	DelayDistribution     *DelayDistribution `json:"delay_distribution,omitempty"`
+	RecentDelays          []RecentDelayLog   `json:"recent_delays,omitempty"`
 }
 
 type TrainSegmentSpeed struct {
