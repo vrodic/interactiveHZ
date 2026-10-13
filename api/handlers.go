@@ -693,14 +693,50 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 	details.DelayMinutes = delayMins
 	details.PositionStatus = posStatus
 
-	activeTrains, _ := s.ComputeActiveTrains(nowSec)
-	for _, tr := range activeTrains {
-		if tr.TrainNumber == trainNum || tr.TripID == details.TripID {
-			details.IsActive = true
-			details.Lat = tr.CurrentLat
-			details.Lon = tr.CurrentLon
-			break
+	// Targeted calculation for single train active status & coordinates
+	effectiveTime := nowSec - (delayMins * 60)
+	calCond, calArgs := getCalendarCondition(zgNow)
+	activeQuery := fmt.Sprintf(`
+		SELECT st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon, st1.departure_seconds,
+		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon, st2.arrival_seconds
+		FROM stop_times st1
+		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
+		JOIN stations s1 ON st1.stop_id = s1.stop_id
+		JOIN stations s2 ON st2.stop_id = s2.stop_id
+		JOIN trips t ON st1.trip_id = t.trip_id
+		LEFT JOIN calendar c ON t.service_id = c.service_id
+		WHERE (COALESCE(t.trip_short_name, t.trip_id) = ? OR t.trip_id = ?)
+		  AND st1.departure_seconds <= ? AND st2.arrival_seconds >= ?
+		  AND %s
+		LIMIT 1
+	`, calCond)
+
+	activeArgs := []interface{}{trainNum, details.TripID, effectiveTime, effectiveTime}
+	activeArgs = append(activeArgs, calArgs...)
+
+	var (
+		s1ID, s1Name     string
+		s1Lat, s1Lon     float64
+		s1DepSec         int
+		s2ID, s2Name     string
+		s2Lat, s2Lon     float64
+		s2ArrSec         int
+	)
+	if err := s.db.QueryRow(activeQuery, activeArgs...).Scan(&s1ID, &s1Name, &s1Lat, &s1Lon, &s1DepSec, &s2ID, &s2Name, &s2Lat, &s2Lon, &s2ArrSec); err == nil {
+		details.IsActive = true
+		duration := float64(s2ArrSec - s1DepSec)
+		progress := 0.0
+		if duration > 0 {
+			progress = float64(effectiveTime-s1DepSec) / duration
+			if progress < 0 {
+				progress = 0
+			}
+			if progress > 1 {
+				progress = 1
+			}
 		}
+		pathWaypoints := s.getRouteWaypoints(s1ID, s2ID, s1Lat, s1Lon, s2Lat, s2Lon)
+		details.Lat, details.Lon = interpolateAlongPath(pathWaypoints, progress)
 	}
 
 	details.DelayDistribution = s.computeDelayDistribution(trainNum)
@@ -734,37 +770,20 @@ func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
 }
 
 func (s *Server) computeDelayDistribution(trainNum string) *DelayDistribution {
-	rows, err := s.db.Query(`
-		SELECT delay_minutes
+	var total, onTime, late1To5, late5To10, late10To30, lateOver30 int
+	err := s.db.QueryRow(`
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN delay_minutes <= 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN delay_minutes > 0 AND delay_minutes <= 5 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN delay_minutes > 5 AND delay_minutes <= 10 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN delay_minutes > 10 AND delay_minutes <= 30 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN delay_minutes > 30 THEN 1 ELSE 0 END), 0)
 		FROM historical_train_delays
 		WHERE train_number = ?
-	`, trainNum)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
+	`, trainNum).Scan(&total, &onTime, &late1To5, &late5To10, &late10To30, &lateOver30)
 
-	var total, onTime, late1To5, late5To10, late10To30, lateOver30 int
-	for rows.Next() {
-		var dm int
-		if err := rows.Scan(&dm); err != nil {
-			continue
-		}
-		total++
-		if dm <= 0 {
-			onTime++
-		} else if dm <= 5 {
-			late1To5++
-		} else if dm <= 10 {
-			late5To10++
-		} else if dm <= 30 {
-			late10To30++
-		} else {
-			lateOver30++
-		}
-	}
-
-	if total == 0 {
+	if err != nil || total == 0 {
 		return nil
 	}
 

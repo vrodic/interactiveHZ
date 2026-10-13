@@ -1666,12 +1666,20 @@ function formatCleanDate(dateStr) {
     return dateStr.split('T')[0];
 }
 
+let expandedDelayDateGroups = new Set();
+
 window.toggleDelayDateGroup = function(cleanDate) {
     const rows = document.querySelectorAll(`.delay-subrow-${cleanDate}`);
     const toggleBtn = document.getElementById(`toggle-date-${cleanDate}`);
     if (!rows.length) return;
 
     const isHidden = rows[0].style.display === 'none';
+    if (isHidden) {
+        expandedDelayDateGroups.add(cleanDate);
+    } else {
+        expandedDelayDateGroups.delete(cleanDate);
+    }
+
     rows.forEach(r => {
         r.style.display = isHidden ? 'table-row' : 'none';
     });
@@ -1717,15 +1725,18 @@ function renderRecentDelaysHTML(logs) {
         const dayLogs = dateGroups[cleanDate];
         const primary = dayLogs[0];
         const hasSub = dayLogs.length > 1;
+        const isExpanded = expandedDelayDateGroups.has(cleanDate);
 
         const delayMins = primary.delay_minutes || 0;
         const color = delayMins > 0 ? '#ef4444' : '#10b981';
         const delayText = delayMins > 0 ? `+${delayMins} min late` : 'On Time';
         const timePart = primary.updated_at ? ` ${escapeHTML(primary.updated_at)}` : '';
 
+        const arrowSymbol = isExpanded ? '▴' : '▾';
+
         const dateCellHTML = hasSub ? `
             <span onclick="toggleDelayDateGroup('${escapeHTML(cleanDate)}')" style="cursor: pointer; text-decoration: underline; color: #00e5ff; font-weight: bold;" title="Click to view all ${dayLogs.length} logs for this date">
-                ${escapeHTML(cleanDate)}${timePart} <span id="toggle-date-${escapeHTML(cleanDate)}" style="font-size: 11px;">▾</span>
+                ${escapeHTML(cleanDate)}${timePart} <span id="toggle-date-${escapeHTML(cleanDate)}" style="font-size: 11px;">${arrowSymbol}</span>
             </span>
         ` : `${escapeHTML(cleanDate)}${timePart}`;
 
@@ -1738,6 +1749,7 @@ function renderRecentDelaysHTML(logs) {
         `;
 
         if (hasSub) {
+            const subDisplayStyle = isExpanded ? 'table-row' : 'none';
             for (let i = 1; i < dayLogs.length; i++) {
                 const sub = dayLogs[i];
                 const subDelayMins = sub.delay_minutes || 0;
@@ -1746,7 +1758,7 @@ function renderRecentDelaysHTML(logs) {
                 const subTimePart = sub.updated_at ? escapeHTML(sub.updated_at) : '';
 
                 rowsHTML += `
-                    <tr class="delay-subrow-${escapeHTML(cleanDate)}" style="display: none; background: #161b22; border-bottom: 1px dashed #2a313d;">
+                    <tr class="delay-subrow-${escapeHTML(cleanDate)}" style="display: ${subDisplayStyle}; background: #161b22; border-bottom: 1px dashed #2a313d;">
                         <td style="padding: 4px 4px 4px 16px; color: #6e7681; font-size: 11px;">↳ ${subTimePart}</td>
                         <td style="padding: 4px; color: ${subColor}; font-size: 11px; font-weight: bold;">${escapeHTML(subDelayText)}</td>
                         <td style="padding: 4px; color: #a5d6ff; font-size: 11px;">${escapeHTML(sub.last_station || sub.position_status || 'In Transit')}</td>
