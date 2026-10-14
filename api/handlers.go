@@ -1305,6 +1305,80 @@ func (s *Server) FetchTrainDelay(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(delayResp)
 }
 
+func (s *Server) autoGenerateMissingArrivals() {
+	zgNow := getZagrebTime()
+	nowSec := zgNow.Hour()*3600 + zgNow.Minute()*60 + zgNow.Second()
+	todayStr := zgNow.Format("2006-01-02")
+
+	calCond, calArgs := getCalendarCondition(zgNow)
+
+	// Query trains running today whose final scheduled arrival time + delay + 10 mins buffer has passed
+	query := fmt.Sprintf(`
+		SELECT COALESCE(t.trip_short_name, t.trip_id) as tr_num, MAX(st.arrival_seconds) as last_arr_sec, s.stop_name as dest_name, td.delay_minutes
+		FROM stop_times st
+		JOIN trips t ON st.trip_id = t.trip_id
+		LEFT JOIN calendar c ON t.service_id = c.service_id
+		JOIN stations s ON st.stop_id = s.stop_id
+		JOIN train_delays td ON td.train_number = COALESCE(t.trip_short_name, t.trip_id)
+		WHERE %s
+		  AND (td.position_status IS NULL OR LOWER(td.position_status) != 'arrived')
+		GROUP BY tr_num
+		HAVING (last_arr_sec + COALESCE(td.delay_minutes, 0) * 60 + 600) <= ?
+	`, calCond)
+
+	args := append(calArgs, nowSec)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type unarrivedTrain struct {
+		trainNum string
+		lastArrSec int
+		destName string
+		delayMins int
+	}
+	var unarrived []unarrivedTrain
+
+	for rows.Next() {
+		var u unarrivedTrain
+		if err := rows.Scan(&u.trainNum, &u.lastArrSec, &u.destName, &u.delayMins); err == nil {
+			unarrived = append(unarrived, u)
+		}
+	}
+
+	for _, u := range unarrived {
+		effectiveSec := u.lastArrSec + (u.delayMins * 60)
+		dayBase := time.Date(zgNow.Year(), zgNow.Month(), zgNow.Day(), 0, 0, 0, 0, zgNow.Location())
+		arrTimestampStr := dayBase.Add(time.Duration(effectiveSec) * time.Second).Format("2006-01-02 15:04:05")
+
+		// Update train_delays table
+		_, _ = s.db.Exec(`
+			UPDATE train_delays
+			SET position_status = 'arrived',
+				last_station = ?,
+				next_station = '',
+				updated_at = ?
+			WHERE train_number = ?
+		`, u.destName, arrTimestampStr, u.trainNum)
+
+		// Check if historical arrival record already exists for today
+		var existingArrived int
+		_ = s.db.QueryRow(`
+			SELECT COUNT(*) FROM historical_train_delays
+			WHERE train_number = ? AND delay_date = ? AND LOWER(position_status) = 'arrived'
+		`, u.trainNum, todayStr).Scan(&existingArrived)
+
+		if existingArrived == 0 {
+			_, _ = s.db.Exec(`
+				INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
+				VALUES (?, ?, ?, 'arrived', ?, '', ?)
+			`, u.trainNum, todayStr, u.delayMins, u.destName, arrTimestampStr)
+		}
+	}
+}
+
 func (s *Server) StartBackgroundDelayWorker() {
 	lastQueried := make(map[string]time.Time)
 	var mu sync.Mutex
@@ -1315,6 +1389,8 @@ func (s *Server) StartBackgroundDelayWorker() {
 			zgNow := getZagrebTime()
 			nowSec := zgNow.Hour()*3600 + zgNow.Minute()*60 + zgNow.Second()
 			todayStr := zgNow.Format("2006-01-02")
+
+			s.autoGenerateMissingArrivals()
 
 			calCond, calArgs := getCalendarCondition(zgNow)
 

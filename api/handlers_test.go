@@ -538,6 +538,38 @@ func TestHistoricalTrainDelaysUniqueChangesOnly(t *testing.T) {
 	}
 }
 
+func TestAutoGenerateMissingArrivals(t *testing.T) {
+	srv := setupTestDB(t)
+
+	zgNowStr := getZagrebTime().Format("2006-01-02 15:04:05")
+
+	// Pre-populate train_delays for train 2010 with position_status 'en_route' and 5 min delay
+	_, err := srv.db.Exec(`
+		INSERT INTO train_delays (train_number, delay_minutes, position_status, last_station, next_station, updated_at)
+		VALUES ('2010', 5, 'en_route', 's1', 's2', ?)
+	`, zgNowStr)
+	if err != nil {
+		t.Fatalf("Failed to insert train_delays: %v", err)
+	}
+
+	// Trigger autoGenerateMissingArrivals
+	srv.autoGenerateMissingArrivals()
+
+	var posStatus string
+	var delayMins int
+	err = srv.db.QueryRow("SELECT position_status, delay_minutes FROM train_delays WHERE train_number = '2010'").Scan(&posStatus, &delayMins)
+	if err != nil {
+		t.Fatalf("Failed to query train_delays: %v", err)
+	}
+
+	if posStatus != "arrived" {
+		t.Errorf("Expected position_status 'arrived', got '%s'", posStatus)
+	}
+	if delayMins != 5 {
+		t.Errorf("Expected retained delay_minutes of 5, got %d", delayMins)
+	}
+}
+
 func BenchmarkGetSegments(b *testing.B) {
 	t := &testing.T{}
 	srv := setupTestDB(t)
