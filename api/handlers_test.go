@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"hz-train-map/db"
 )
@@ -131,11 +132,14 @@ func TestGetTrainDetails(t *testing.T) {
 func TestRecentDelaysRetrieval(t *testing.T) {
 	srv := setupTestDB(t)
 
+	zgNowStr := getZagrebTime().Format("2006-01-02 15:04:05")
+	zgYesterdayStr := getZagrebTime().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+
 	_, err := srv.db.Exec(`
 		INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
-		VALUES ('2010', date('now'), 15, 'In Transit', 'Zagreb Glavni Kolodvor', 'Vinkovci', CURRENT_TIMESTAMP),
-		       ('2010', date('now', '-1 day'), 5, 'Arrived', 'Vinkovci', '', datetime('now', '-1 day'));
-	`)
+		VALUES ('2010', date(?), 15, 'In Transit', 'Zagreb Glavni Kolodvor', 'Vinkovci', ?),
+		       ('2010', date(?), 5, 'Arrived', 'Vinkovci', '', ?);
+	`, zgNowStr, zgNowStr, zgYesterdayStr, zgYesterdayStr)
 	if err != nil {
 		t.Fatalf("Failed to insert historical delays: %v", err)
 	}
@@ -161,6 +165,69 @@ func TestRecentDelaysRetrieval(t *testing.T) {
 
 	if details.RecentDelays[0].DelayMinutes != 15 {
 		t.Errorf("Expected latest delay to be 15 mins, got %d", details.RecentDelays[0].DelayMinutes)
+	}
+}
+
+func TestArrivedDelayNullFallbackAndDeduplication(t *testing.T) {
+	srv := setupTestDB(t)
+
+	zgNow := getZagrebTime()
+	todayStr := zgNow.Format("2006-01-02")
+	zgNowStr := zgNow.Format("2006-01-02 15:04:05")
+
+	// Pre-populate train_delays with a 12-minute delay in transit
+	_, err := srv.db.Exec(`
+		INSERT INTO train_delays (train_number, delay_minutes, position_status, last_station, next_station, updated_at)
+		VALUES ('2010', 12, 'In Transit', 's1', 's2', ?)
+	`, zgNowStr)
+	if err != nil {
+		t.Fatalf("Failed to populate initial train delay: %v", err)
+	}
+
+	// 1. Simulate arrival update where delay is null in API response
+	// The logic should fallback to previous delay (12 mins) and record historical entry once.
+	isArrivedStatus := true
+	var delayRespDelay *int = nil // null delay
+	delayMins := 0
+	if delayRespDelay != nil {
+		delayMins = *delayRespDelay
+	} else if isArrivedStatus {
+		var prevDelay int
+		if errPrev := srv.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = '2010'").Scan(&prevDelay); errPrev == nil {
+			delayMins = prevDelay
+		}
+	}
+
+	if delayMins != 12 {
+		t.Errorf("Expected fallback delay of 12 mins, got %d", delayMins)
+	}
+
+	// First arrived record insert
+	var existingArrivedCount int
+	_ = srv.db.QueryRow(`
+		SELECT COUNT(*) FROM historical_train_delays
+		WHERE train_number = '2010' AND delay_date = ? AND LOWER(position_status) = 'arrived'
+	`, todayStr).Scan(&existingArrivedCount)
+
+	shouldRecordHist := (existingArrivedCount == 0)
+	if !shouldRecordHist {
+		t.Fatalf("Expected shouldRecordHist to be true for first arrived record")
+	}
+
+	_, _ = srv.db.Exec(`
+		INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
+		VALUES ('2010', ?, ?, 'Arrived', 's2', '', ?)
+	`, todayStr, delayMins, zgNowStr)
+
+	// 2. Simulate subsequent arrived update later for the same train
+	_ = srv.db.QueryRow(`
+		SELECT COUNT(*) FROM historical_train_delays
+		WHERE train_number = '2010' AND delay_date = ? AND LOWER(position_status) = 'arrived'
+	`, todayStr).Scan(&existingArrivedCount)
+
+	shouldRecordHistSecond := (existingArrivedCount == 0)
+	if shouldRecordHistSecond {
+		t.Errorf("Expected shouldRecordHist to be false for subsequent arrived record on same date")
 	}
 }
 

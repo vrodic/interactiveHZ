@@ -458,7 +458,8 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var delayMins int
-		err := s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ? AND updated_at >= datetime('now', '-6 hours')", entry.TrainNumber).Scan(&delayMins)
+		cutoffStr := zgNow.Add(-6 * time.Hour).Format("2006-01-02 15:04:05")
+		err := s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ? AND updated_at >= ?", entry.TrainNumber, cutoffStr).Scan(&delayMins)
 		if err == nil {
 			entry.DelayMinutes = &delayMins
 		}
@@ -474,7 +475,8 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 	zgNow := getZagrebTime()
 
 	delayMap := make(map[string]int)
-	if delayRows, err := s.db.Query("SELECT train_number, delay_minutes FROM train_delays WHERE updated_at >= datetime('now', '-6 hours')"); err == nil {
+	cutoffStr := zgNow.Add(-6 * time.Hour).Format("2006-01-02 15:04:05")
+	if delayRows, err := s.db.Query("SELECT train_number, delay_minutes FROM train_delays WHERE updated_at >= ?", cutoffStr); err == nil {
 		defer delayRows.Close()
 		for delayRows.Next() {
 			var trNum string
@@ -689,7 +691,8 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 
 	var delayMins int
 	var posStatus string
-	_ = s.db.QueryRow("SELECT delay_minutes, COALESCE(position_status, '') FROM train_delays WHERE train_number = ? AND updated_at >= datetime('now', '-6 hours')", trainNum).Scan(&delayMins, &posStatus)
+	cutoffStr := zgNow.Add(-6 * time.Hour).Format("2006-01-02 15:04:05")
+	_ = s.db.QueryRow("SELECT delay_minutes, COALESCE(position_status, '') FROM train_delays WHERE train_number = ? AND updated_at >= ?", trainNum, cutoffStr).Scan(&delayMins, &posStatus)
 	details.DelayMinutes = delayMins
 	details.PositionStatus = posStatus
 
@@ -747,22 +750,45 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
+	cutoffStr := getZagrebTime().Add(-72 * time.Hour).Format("2006-01-02 15:04:05")
 	rows, err := s.db.Query(`
-		SELECT delay_date, delay_minutes, COALESCE(position_status, ''), COALESCE(last_station, ''), strftime('%H:%M', updated_at)
+		SELECT delay_date, delay_minutes, COALESCE(position_status, ''), COALESCE(last_station, ''), updated_at
 		FROM historical_train_delays
-		WHERE train_number = ? AND updated_at >= datetime('now', '-3 days')
+		WHERE train_number = ? AND updated_at >= ?
 		ORDER BY updated_at DESC, id DESC
 		LIMIT 20
-	`, trainNum)
+	`, trainNum, cutoffStr)
 	if err != nil {
 		return []RecentDelayLog{}
 	}
 	defer rows.Close()
 
 	logs := make([]RecentDelayLog, 0)
+	loc, _ := time.LoadLocation("Europe/Zagreb")
+	if loc == nil {
+		loc = time.FixedZone("CEST", 2*3600)
+	}
+
 	for rows.Next() {
 		var l RecentDelayLog
-		if err := rows.Scan(&l.DelayDate, &l.DelayMinutes, &l.PositionStatus, &l.LastStation, &l.UpdatedAt); err == nil {
+		var rawUpdatedAt string
+		if err := rows.Scan(&l.DelayDate, &l.DelayMinutes, &l.PositionStatus, &l.LastStation, &rawUpdatedAt); err == nil {
+			parsedTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", rawUpdatedAt, loc)
+			if parseErr == nil {
+				l.UpdatedAt = parsedTime.Format("15:04")
+			} else {
+				parts := strings.Split(rawUpdatedAt, " ")
+				if len(parts) > 1 {
+					timeParts := strings.Split(parts[1], ":")
+					if len(timeParts) >= 2 {
+						l.UpdatedAt = timeParts[0] + ":" + timeParts[1]
+					} else {
+						l.UpdatedAt = rawUpdatedAt
+					}
+				} else {
+					l.UpdatedAt = rawUpdatedAt
+				}
+			}
 			logs = append(logs, l)
 		}
 	}
@@ -1043,7 +1069,8 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 	var currentDelay int
 	var lastSt, nextSt string
 	var updatedAtStr string
-	errDB := s.db.QueryRow("SELECT position_status, delay_minutes, last_station, next_station, DATE(updated_at) FROM train_delays WHERE train_number = ? AND updated_at >= datetime('now', '-6 hours')", trainID).Scan(&currentPosStatus, &currentDelay, &lastSt, &nextSt, &updatedAtStr)
+	cutoff6h := zgNow.Add(-6 * time.Hour).Format("2006-01-02 15:04:05")
+	errDB := s.db.QueryRow("SELECT position_status, delay_minutes, last_station, next_station, DATE(updated_at) FROM train_delays WHERE train_number = ? AND updated_at >= ?", trainID, cutoff6h).Scan(&currentPosStatus, &currentDelay, &lastSt, &nextSt, &updatedAtStr)
 
 	if errDB == nil && strings.EqualFold(strings.TrimSpace(currentPosStatus), "arrived") && updatedAtStr == todayStr {
 		if cached, ok := s.delayCache.Load(trainID); ok {
@@ -1111,9 +1138,17 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 			WHERE COALESCE(t.trip_short_name, t.trip_id) = ?
 		`, trainID).Scan(&firstDepSec, &lastArrSec)
 
+		isArrivedStatus := strings.EqualFold(strings.TrimSpace(delayResp.Data.PositionStatus), "arrived")
+
 		delayMins := 0
 		if delayResp.Data.DelayMinutes != nil {
 			delayMins = *delayResp.Data.DelayMinutes
+		} else if isArrivedStatus {
+			// Fallback to previous recorded delay if delay is null upon arrival
+			var prevDelay int
+			if errPrev := s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ?", trainID).Scan(&prevDelay); errPrev == nil {
+				delayMins = prevDelay
+			}
 		}
 		nextSt := ""
 		if delayResp.Data.NextStation != nil {
@@ -1123,12 +1158,14 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 		isActiveTrain := true
 		if errSchedule == nil {
 			effectiveArrSec := lastArrSec + (delayMins * 60)
-			if (nowSec < firstDepSec || nowSec > effectiveArrSec+7200) && !strings.EqualFold(strings.TrimSpace(delayResp.Data.PositionStatus), "arrived") {
+			if (nowSec < firstDepSec || nowSec > effectiveArrSec+7200) && !isArrivedStatus {
 				isActiveTrain = false
 			}
 		}
 
 		if isActiveTrain {
+			nowZagrebStr := zgNow.Format("2006-01-02 15:04:05")
+
 			var lastHistDelay int
 			var lastHistStatus, lastHistLastSt, lastHistNextSt string
 			errHist := s.db.QueryRow(`
@@ -1138,28 +1175,42 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 				ORDER BY id DESC LIMIT 1
 			`, trainID).Scan(&lastHistDelay, &lastHistStatus, &lastHistLastSt, &lastHistNextSt)
 
-			isHistChanged := (errHist != nil) ||
-				(lastHistDelay != delayMins) ||
-				(lastHistStatus != delayResp.Data.PositionStatus) ||
-				(lastHistLastSt != delayResp.Data.LastStation) ||
-				(lastHistNextSt != nextSt)
+			// Check if we already recorded an 'arrived' status today for this train
+			var existingArrivedCount int
+			_ = s.db.QueryRow(`
+				SELECT COUNT(*) FROM historical_train_delays
+				WHERE train_number = ? AND delay_date = ? AND LOWER(position_status) = 'arrived'
+			`, trainID, todayStr).Scan(&existingArrivedCount)
+
+			shouldRecordHist := false
+			if isArrivedStatus {
+				if existingArrivedCount == 0 {
+					shouldRecordHist = true
+				}
+			} else {
+				shouldRecordHist = (errHist != nil) ||
+					(lastHistDelay != delayMins) ||
+					(lastHistStatus != delayResp.Data.PositionStatus) ||
+					(lastHistLastSt != delayResp.Data.LastStation) ||
+					(lastHistNextSt != nextSt)
+			}
 
 			_, _ = s.db.Exec(`
 				INSERT INTO train_delays (train_number, delay_minutes, position_status, last_station, next_station, updated_at)
-				VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(train_number) DO UPDATE SET
 					delay_minutes=excluded.delay_minutes,
 					position_status=excluded.position_status,
 					last_station=excluded.last_station,
 					next_station=excluded.next_station,
-					updated_at=CURRENT_TIMESTAMP
-			`, trainID, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
+					updated_at=excluded.updated_at
+			`, trainID, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt, nowZagrebStr)
 
-			if isHistChanged {
+			if shouldRecordHist {
 				_, _ = s.db.Exec(`
 					INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
-					VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-				`, trainID, todayStr, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt)
+					VALUES (?, ?, ?, ?, ?, ?, ?)
+				`, trainID, todayStr, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt, nowZagrebStr)
 			}
 
 			eventJSON, _ := json.Marshal(map[string]interface{}{
@@ -1392,7 +1443,8 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 			var entry RoutePlanEntry
 			if err := rows.Scan(&entry.TripID, &entry.TrainNumber, &entry.Headsign, &entry.OriginStationName, &entry.DestinationStationName, &entry.DepartureTime, &entry.ArrivalTime, &entry.DepartureSeconds, &entry.DurationMinutes); err == nil {
 				var delayMins int
-				_ = s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ? AND updated_at >= datetime('now', '-6 hours')", entry.TrainNumber).Scan(&delayMins)
+				cutoffStr := zgNow.Add(-6 * time.Hour).Format("2006-01-02 15:04:05")
+				_ = s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ? AND updated_at >= ?", entry.TrainNumber, cutoffStr).Scan(&delayMins)
 				entry.DelayMinutes = delayMins
 				results = append(results, entry)
 			}
