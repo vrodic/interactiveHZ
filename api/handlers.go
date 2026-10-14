@@ -1572,13 +1572,15 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 		SELECT MIN(st1.trip_id), COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
 		       s1.stop_name as origin_name, s2.stop_name as dest_name,
 		       st1.departure_time, st2.arrival_time, st1.departure_seconds,
-		       (st2.arrival_seconds - st1.departure_seconds) / 60 as duration
+		       (st2.arrival_seconds - st1.departure_seconds) / 60 as duration,
+		       COALESCE(td.delay_minutes, 0) as delay_mins
 		FROM stop_times st1
 		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence > st1.stop_sequence
 		JOIN stations s1 ON st1.stop_id = s1.stop_id
 		JOIN stations s2 ON st2.stop_id = s2.stop_id
 		JOIN trips t ON st1.trip_id = t.trip_id
 		LEFT JOIN calendar c ON t.service_id = c.service_id
+		LEFT JOIN train_delays td ON td.train_number = COALESCE(t.trip_short_name, t.trip_id)
 		WHERE st1.stop_id IN (%s) AND st2.stop_id IN (%s) AND %s
 		GROUP BY train_num, st1.departure_seconds, st2.arrival_seconds
 		ORDER BY st1.departure_seconds ASC
@@ -1592,11 +1594,12 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		for rows.Next() {
 			var entry RoutePlanEntry
-			if err := rows.Scan(&entry.TripID, &entry.TrainNumber, &entry.Headsign, &entry.OriginStationName, &entry.DestinationStationName, &entry.DepartureTime, &entry.ArrivalTime, &entry.DepartureSeconds, &entry.DurationMinutes); err == nil {
-				var delayMins int
-				cutoffStr := zgNow.Add(-6 * time.Hour).Format("2006-01-02 15:04:05")
-				_ = s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ? AND updated_at >= ?", entry.TrainNumber, cutoffStr).Scan(&delayMins)
-				entry.DelayMinutes = delayMins
+			if err := rows.Scan(&entry.TripID, &entry.TrainNumber, &entry.Headsign, &entry.OriginStationName, &entry.DestinationStationName, &entry.DepartureTime, &entry.ArrivalTime, &entry.DepartureSeconds, &entry.DurationMinutes, &entry.DelayMinutes); err == nil {
+				if entry.DelayMinutes == 0 {
+					if del, found := s.getTrainDelayMinutes(entry.TrainNumber); found {
+						entry.DelayMinutes = del
+					}
+				}
 				results = append(results, entry)
 			}
 		}
