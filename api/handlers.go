@@ -410,6 +410,30 @@ func getCalendarCondition(t time.Time) (string, []interface{}) {
 	return cond, []interface{}{dateStr, dateStr, dateStr, dateStr}
 }
 
+func (s *Server) getTrainDelayMinutes(trainNum string) (int, bool) {
+	var delayMins int
+	err := s.db.QueryRow(`
+		SELECT delay_minutes
+		FROM train_delays
+		WHERE train_number = ?
+	`, trainNum).Scan(&delayMins)
+	if err == nil {
+		return delayMins, true
+	}
+
+	errHist := s.db.QueryRow(`
+		SELECT delay_minutes
+		FROM historical_train_delays
+		WHERE train_number = ?
+		ORDER BY id DESC LIMIT 1
+	`, trainNum).Scan(&delayMins)
+	if errHist == nil {
+		return delayMins, true
+	}
+
+	return 0, false
+}
+
 func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 	stopID := strings.TrimPrefix(r.URL.Path, "/api/stations/")
 	stopID = strings.TrimSuffix(stopID, "/timetable")
@@ -657,26 +681,60 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 	var details TrainDetails
 	details.TrainNumber = trainNum
 
-	query := `
+	calCond, calArgs := getCalendarCondition(zgNow)
+
+	query := fmt.Sprintf(`
 		SELECT t.trip_id, COALESCE(t.trip_headsign, ''),
 		       s_first.stop_name, st_first.departure_time, st_first.departure_seconds,
 		       s_last.stop_name, st_last.arrival_time, st_last.arrival_seconds
 		FROM trips t
+		LEFT JOIN calendar c ON t.service_id = c.service_id
 		JOIN stop_times st_first ON st_first.trip_id = t.trip_id AND st_first.stop_sequence = 1
 		JOIN stations s_first ON st_first.stop_id = s_first.stop_id
 		JOIN stop_times st_last ON st_last.trip_id = t.trip_id AND st_last.stop_sequence = (
 			SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id
 		)
 		JOIN stations s_last ON st_last.stop_id = s_last.stop_id
-		WHERE COALESCE(t.trip_short_name, t.trip_id) = ? OR t.trip_id = ?
+		WHERE (COALESCE(t.trip_short_name, t.trip_id) = ? OR t.trip_id = ?) AND %s
+		ORDER BY (
+			SELECT COUNT(*) FROM stop_times WHERE trip_id = t.trip_id
+		) DESC
 		LIMIT 1
-	`
+	`, calCond)
 
-	err := s.db.QueryRow(query, trainNum, trainNum).Scan(
+	queryArgs := []interface{}{trainNum, trainNum}
+	queryArgs = append(queryArgs, calArgs...)
+
+	err := s.db.QueryRow(query, queryArgs...).Scan(
 		&details.TripID, &details.Headsign,
 		&details.FirstStationName, &details.FirstDepartureTime, &details.FirstDepartureSeconds,
 		&details.LastStationName, &details.LastArrivalTime, &details.LastArrivalSeconds,
 	)
+	if err != nil {
+		// Fallback query if no active trip matches calendar for today
+		fallbackQuery := `
+			SELECT t.trip_id, COALESCE(t.trip_headsign, ''),
+			       s_first.stop_name, st_first.departure_time, st_first.departure_seconds,
+			       s_last.stop_name, st_last.arrival_time, st_last.arrival_seconds
+			FROM trips t
+			JOIN stop_times st_first ON st_first.trip_id = t.trip_id AND st_first.stop_sequence = 1
+			JOIN stations s_first ON st_first.stop_id = s_first.stop_id
+			JOIN stop_times st_last ON st_last.trip_id = t.trip_id AND st_last.stop_sequence = (
+				SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id
+			)
+			JOIN stations s_last ON st_last.stop_id = s_last.stop_id
+			WHERE COALESCE(t.trip_short_name, t.trip_id) = ? OR t.trip_id = ?
+			ORDER BY (
+				SELECT COUNT(*) FROM stop_times WHERE trip_id = t.trip_id
+			) DESC
+			LIMIT 1
+		`
+		err = s.db.QueryRow(fallbackQuery, trainNum, trainNum).Scan(
+			&details.TripID, &details.Headsign,
+			&details.FirstStationName, &details.FirstDepartureTime, &details.FirstDepartureSeconds,
+			&details.LastStationName, &details.LastArrivalTime, &details.LastArrivalSeconds,
+		)
+	}
 	if err != nil {
 		http.Error(w, "Train not found", http.StatusNotFound)
 		return
@@ -691,14 +749,18 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 
 	var delayMins int
 	var posStatus string
-	cutoffStr := zgNow.Add(-6 * time.Hour).Format("2006-01-02 15:04:05")
-	_ = s.db.QueryRow("SELECT delay_minutes, COALESCE(position_status, '') FROM train_delays WHERE train_number = ? AND updated_at >= ?", trainNum, cutoffStr).Scan(&delayMins, &posStatus)
+	_ = s.db.QueryRow("SELECT delay_minutes, COALESCE(position_status, '') FROM train_delays WHERE train_number = ?", trainNum).Scan(&delayMins, &posStatus)
+	if delayMins == 0 {
+		if del, found := s.getTrainDelayMinutes(trainNum); found {
+			delayMins = del
+		}
+	}
 	details.DelayMinutes = delayMins
 	details.PositionStatus = posStatus
 
 	// Targeted calculation for single train active status & coordinates
 	effectiveTime := nowSec - (delayMins * 60)
-	calCond, calArgs := getCalendarCondition(zgNow)
+	calCondActive, calArgsActive := getCalendarCondition(zgNow)
 	activeQuery := fmt.Sprintf(`
 		SELECT st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon, st1.departure_seconds,
 		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon, st2.arrival_seconds
@@ -712,10 +774,10 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 		  AND st1.departure_seconds <= ? AND st2.arrival_seconds >= ?
 		  AND %s
 		LIMIT 1
-	`, calCond)
+	`, calCondActive)
 
 	activeArgs := []interface{}{trainNum, details.TripID, effectiveTime, effectiveTime}
-	activeArgs = append(activeArgs, calArgs...)
+	activeArgs = append(activeArgs, calArgsActive...)
 
 	var (
 		s1ID, s1Name     string
