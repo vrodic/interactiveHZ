@@ -1141,14 +1141,18 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 		isArrivedStatus := strings.EqualFold(strings.TrimSpace(delayResp.Data.PositionStatus), "arrived")
 
 		delayMins := 0
-		if delayResp.Data.DelayMinutes != nil {
+		if delayResp.Data.DelayMinutes != nil && *delayResp.Data.DelayMinutes > 0 {
 			delayMins = *delayResp.Data.DelayMinutes
 		} else if isArrivedStatus {
-			// Fallback to previous recorded delay if delay is null upon arrival
+			// Fallback to previous recorded delay if delay is 0 or null upon arrival
 			var prevDelay int
-			if errPrev := s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ?", trainID).Scan(&prevDelay); errPrev == nil {
+			if errPrev := s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ?", trainID).Scan(&prevDelay); errPrev == nil && prevDelay > 0 {
 				delayMins = prevDelay
+			} else if delayResp.Data.DelayMinutes != nil {
+				delayMins = *delayResp.Data.DelayMinutes
 			}
+		} else if delayResp.Data.DelayMinutes != nil {
+			delayMins = *delayResp.Data.DelayMinutes
 		}
 		nextSt := ""
 		if delayResp.Data.NextStation != nil {
@@ -1165,6 +1169,15 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 
 		if isActiveTrain {
 			nowZagrebStr := zgNow.Format("2006-01-02 15:04:05")
+			if isArrivedStatus && errSchedule == nil && lastArrSec > 0 {
+				effectiveSec := lastArrSec + (delayMins * 60)
+				baseDate := zgNow
+				if nowSec < firstDepSec {
+					baseDate = baseDate.AddDate(0, 0, -1)
+				}
+				dayBase := time.Date(baseDate.Year(), baseDate.Month(), baseDate.Day(), 0, 0, 0, 0, baseDate.Location())
+				nowZagrebStr = dayBase.Add(time.Duration(effectiveSec) * time.Second).Format("2006-01-02 15:04:05")
+			}
 
 			var lastHistDelay int
 			var lastHistStatus, lastHistLastSt, lastHistNextSt string
