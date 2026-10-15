@@ -784,8 +784,34 @@ function initNavHandlers() {
     const dashboardModal = document.getElementById('dashboard-modal');
     const delaysStreamModal = document.getElementById('delays-stream-modal');
     const tripPlannerDrawer = document.getElementById('trip-planner-drawer');
+    const leftSidebar = document.getElementById('left-sidebar');
+    const timeControls = document.getElementById('time-controls');
+    const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const toggleTimeControlsBtn = document.getElementById('toggle-time-controls-btn');
+
+    if (mobileMenuBtn && leftSidebar) {
+        mobileMenuBtn.addEventListener('click', () => {
+            leftSidebar.classList.toggle('mobile-open');
+        });
+    }
+
+    if (toggleTimeControlsBtn && timeControls) {
+        toggleTimeControlsBtn.addEventListener('click', () => {
+            const isHidden = timeControls.style.display === 'none' || !timeControls.style.display;
+            timeControls.style.display = isHidden ? 'flex' : 'none';
+            toggleTimeControlsBtn.classList.toggle('active', isHidden);
+            closeMobileMenu();
+        });
+    }
+
+    function closeMobileMenu() {
+        if (leftSidebar && window.innerWidth <= 768) {
+            leftSidebar.classList.remove('mobile-open');
+        }
+    }
 
     document.getElementById('nav-active-trains').addEventListener('click', () => {
+        closeMobileMenu();
         openActiveTrainsModal();
     });
 
@@ -794,6 +820,7 @@ function initNavHandlers() {
     });
 
     document.getElementById('nav-dashboard').addEventListener('click', () => {
+        closeMobileMenu();
         openDashboardModal();
     });
 
@@ -802,6 +829,7 @@ function initNavHandlers() {
     });
 
     document.getElementById('nav-delays-stream').addEventListener('click', () => {
+        closeMobileMenu();
         openDelaysStreamModal();
     });
 
@@ -848,6 +876,7 @@ function initNavHandlers() {
     }
 
     document.getElementById('nav-routes').addEventListener('click', () => {
+        closeMobileMenu();
         tripPlannerDrawer.style.display = 'flex';
     });
 

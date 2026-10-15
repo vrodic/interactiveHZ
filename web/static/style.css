@@ -55,6 +55,17 @@ body, html {
     color: #ffffff;
 }
 
+.mobile-menu-btn {
+    display: none;
+    background: #1e242e;
+    border: 1px solid #3a4250;
+    color: #00e5ff;
+    font-size: 20px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
 .search-section {
     position: relative;
     width: 300px;
@@ -363,6 +374,7 @@ body, html {
         opacity: 1;
     }
 }
+
 
 .train-marker-container.selected-train-marker .train-number-badge {
     background: #ffea00 !important;
@@ -716,5 +728,180 @@ body, html {
     to {
         transform: translateX(0);
         opacity: 1;
+    }
+}
+
+/* Mobile Responsiveness Styles (Smartphones / Small Viewports) */
+@media (max-width: 768px) {
+    #header {
+        padding: 0 10px;
+    }
+
+    .mobile-menu-btn {
+        display: inline-block;
+    }
+
+    .title {
+        display: none;
+    }
+
+    .logo-badge {
+        font-size: 12px;
+        padding: 3px 6px;
+    }
+
+    .search-section {
+        width: 180px;
+        flex: 1;
+        max-width: 220px;
+        margin-left: 8px;
+    }
+
+    .search-input {
+        font-size: 13px;
+        padding: 6px 10px;
+    }
+
+    /* Left Sidebar as Mobile Menu Dropdown/Overlay (Option A) */
+    #left-sidebar {
+        display: none;
+        position: absolute;
+        top: 56px;
+        left: 0;
+        right: 0;
+        width: 100vw;
+        border-radius: 0 0 12px 12px;
+        background: rgba(15, 18, 23, 0.98);
+        border-left: none;
+        border-right: none;
+        border-top: 1px solid #2a313d;
+        padding: 12px 16px;
+        box-shadow: 0 15px 30px rgba(0,0,0,0.8);
+        gap: 10px;
+    }
+
+    #left-sidebar.mobile-open {
+        display: flex !important;
+    }
+
+    .sidebar-btn {
+        width: 100%;
+        padding: 12px 16px;
+        font-size: 14px;
+        justify-content: flex-start;
+    }
+
+    /* Details Panel as Full Screen Overlay on Mobile */
+    #side-panel {
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        width: 100vw;
+        height: 100vh;
+        max-height: 100vh;
+        border-radius: 0;
+        border: none;
+        z-index: 4000;
+        padding: 16px;
+        background: rgba(15, 18, 23, 0.98);
+    }
+
+    /* Time Controls Mobile Compact Bar */
+    #time-controls {
+        bottom: 12px;
+        left: 10px;
+        right: 10px;
+        transform: none;
+        width: calc(100% - 20px);
+        padding: 8px 12px;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: center;
+        border-radius: 18px;
+    }
+
+    .time-btn {
+        padding: 6px 10px;
+        font-size: 12px;
+    }
+
+    .speed-select {
+        padding: 4px 6px;
+        font-size: 12px;
+    }
+
+    .time-display {
+        font-size: 15px;
+        min-width: 65px;
+    }
+
+    .time-slider {
+        width: 130px;
+        flex: 1;
+        min-width: 100px;
+    }
+
+    /* Modals & Tables Full Width Touch Scrollable */
+    .modal-content {
+        width: 96vw;
+        max-height: 90vh;
+        margin: 0 2vw;
+    }
+
+    .modal-header {
+        padding: 12px 14px;
+    }
+
+    .modal-body {
+        padding: 12px 14px;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    /* Bottom Drawer / Trip Planner Mobile Optimizations */
+    .bottom-drawer {
+        height: 85vh;
+        max-height: 85vh;
+    }
+
+    .drawer-body {
+        padding: 12px;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .drawer-body > div:first-child {
+        flex-direction: column;
+        align-items: stretch !important;
+        gap: 8px !important;
+    }
+
+    .drawer-body > div:first-child > div {
+        min-width: 100% !important;
+        width: 100% !important;
+    }
+
+    #swap-stations-btn {
+        align-self: center !important;
+        width: 100% !important;
+        margin-bottom: 0 !important;
+    }
+
+    #find-routes-btn {
+        width: 100% !important;
+        padding: 12px !important;
+    }
+
+    /* Toast Container Mobile Position */
+    #toast-container {
+        top: 64px;
+        left: 10px;
+        right: 10px;
+    }
+
+    .toast-notification {
+        min-width: 100%;
+        max-width: 100%;
     }
 }

@@ -12,6 +12,7 @@
     <div id="app-container">
         <header id="header">
             <div class="logo-section">
+                <button id="mobile-menu-btn" class="mobile-menu-btn" title="Toggle Menu">☰</button>
                 <span class="logo-badge">HŽ PP</span>
                 <span class="title">Interactive Train Map</span>
             </div>
@@ -39,6 +40,10 @@
                 <span class="sidebar-icon">⚡</span>
                 <span class="sidebar-label">Live Delays</span>
             </button>
+            <button id="toggle-time-controls-btn" class="sidebar-btn" title="Toggle Time Controls">
+                <span class="sidebar-icon">⏱️</span>
+                <span class="sidebar-label">Time Controls</span>
+            </button>
             <button id="enable-notifs-btn" class="sidebar-btn" title="Enable Desktop Notifications">
                 <span class="sidebar-icon">🔔</span>
                 <span class="sidebar-label" id="enable-notifs-label">Enable Notifs</span>
@@ -51,7 +56,7 @@
 
         <div id="map"></div>
 
-        <div id="time-controls">
+        <div id="time-controls" style="display: none;">
             <button id="realtime-btn" class="time-btn active">🔴 Realtime</button>
             <button id="play-btn" class="time-btn">▶ Play</button>
             <select id="speed-select" class="speed-select" title="Playback Speed">
