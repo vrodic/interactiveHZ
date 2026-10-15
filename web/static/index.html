@@ -71,8 +71,11 @@
 
         <div id="side-panel">
             <div class="panel-header">
-                <span class="panel-title">Details</span>
-                <button id="close-panel" class="close-btn">&times;</button>
+                <div id="side-panel-title-container" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <span class="panel-title" id="side-panel-title">Details</span>
+                    <span id="side-panel-badge"></span>
+                </div>
+                <button id="close-panel" class="close-btn" aria-label="Close details">&times;</button>
             </div>
             <div id="panel-content"></div>
         </div>

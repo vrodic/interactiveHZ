@@ -222,15 +222,26 @@ body, html {
 }
 
 .close-btn {
-    background: none;
-    border: none;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
     color: #a0aec0;
-    font-size: 20px;
+    font-size: 22px;
+    line-height: 1;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
 }
 
-.close-btn:hover {
-    color: #fff;
+.close-btn:hover, .close-btn:active {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.4);
 }
 
 .detail-row {
@@ -793,6 +804,7 @@ body, html {
 
     /* Details Panel as Full Screen Overlay on Mobile */
     #side-panel {
+        position: fixed;
         top: 0;
         left: 0;
         right: 0;
@@ -802,7 +814,7 @@ body, html {
         max-height: 100vh;
         border-radius: 0;
         border: none;
-        z-index: 4000;
+        z-index: 20000;
         padding: 16px;
         background: rgba(15, 18, 23, 0.98);
     }
