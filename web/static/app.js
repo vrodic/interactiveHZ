@@ -1696,21 +1696,32 @@ async function fetchAndDisplayTrainDetails(trainNum) {
 
 function formatCleanDate(dateStr) {
     if (!dateStr) return '';
-    return dateStr.split('T')[0];
+    const clean = dateStr.split('T')[0];
+    const parts = clean.split('-');
+    if (parts.length === 3) {
+        return `${parts[1]}-${parts[2]}`; // MM-DD omitting year
+    }
+    return clean;
+}
+
+function safeCSSId(str) {
+    if (!str) return '';
+    return str.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
 let expandedDelayDateGroups = new Set();
 
-window.toggleDelayDateGroup = function(cleanDate) {
-    const rows = document.querySelectorAll(`.delay-subrow-${cleanDate}`);
-    const toggleBtn = document.getElementById(`toggle-date-${cleanDate}`);
+window.toggleDelayDateGroup = function(dateKey) {
+    const safeKey = safeCSSId(dateKey);
+    const rows = document.querySelectorAll(`.delay-subrow-${safeKey}`);
+    const toggleBtn = document.getElementById(`toggle-date-${safeKey}`);
     if (!rows.length) return;
 
     const isHidden = rows[0].style.display === 'none';
     if (isHidden) {
-        expandedDelayDateGroups.add(cleanDate);
+        expandedDelayDateGroups.add(dateKey);
     } else {
-        expandedDelayDateGroups.delete(cleanDate);
+        expandedDelayDateGroups.delete(dateKey);
     }
 
     rows.forEach(r => {
@@ -1740,25 +1751,27 @@ function renderRecentDelaysHTML(logs) {
         `;
     }
 
-    // Group logs by clean date
+    // Group logs by raw date (YYYY-MM-DD)
     const dateGroups = {};
     const dateOrder = [];
 
     logs.forEach(l => {
-        const cleanDate = formatCleanDate(l.delay_date);
-        if (!dateGroups[cleanDate]) {
-            dateGroups[cleanDate] = [];
-            dateOrder.push(cleanDate);
+        const rawDate = l.delay_date ? l.delay_date.split('T')[0] : '';
+        if (!dateGroups[rawDate]) {
+            dateGroups[rawDate] = [];
+            dateOrder.push(rawDate);
         }
-        dateGroups[cleanDate].push(l);
+        dateGroups[rawDate].push(l);
     });
 
     let rowsHTML = '';
-    dateOrder.forEach(cleanDate => {
-        const dayLogs = dateGroups[cleanDate];
+    dateOrder.forEach(rawDate => {
+        const dayLogs = dateGroups[rawDate];
         const primary = dayLogs[0];
         const hasSub = dayLogs.length > 1;
-        const isExpanded = expandedDelayDateGroups.has(cleanDate);
+        const isExpanded = expandedDelayDateGroups.has(rawDate);
+        const cleanDate = formatCleanDate(rawDate);
+        const safeKey = safeCSSId(rawDate);
 
         const delayMins = primary.delay_minutes || 0;
         const color = delayMins > 0 ? '#ef4444' : '#10b981';
@@ -1768,8 +1781,8 @@ function renderRecentDelaysHTML(logs) {
         const arrowSymbol = isExpanded ? '▴' : '▾';
 
         const dateCellHTML = hasSub ? `
-            <span onclick="toggleDelayDateGroup('${escapeHTML(cleanDate)}')" style="cursor: pointer; text-decoration: underline; color: #00e5ff; font-weight: bold;" title="Click to view all ${dayLogs.length} logs for this date">
-                ${escapeHTML(cleanDate)}${timePart} <span id="toggle-date-${escapeHTML(cleanDate)}" style="font-size: 11px;">${arrowSymbol}</span>
+            <span onclick="toggleDelayDateGroup('${escapeHTML(rawDate)}')" style="cursor: pointer; text-decoration: underline; color: #00e5ff; font-weight: bold;" title="Click to view all ${dayLogs.length} logs for this date">
+                ${escapeHTML(cleanDate)}${timePart} <span id="toggle-date-${escapeHTML(safeKey)}" style="font-size: 11px;">${arrowSymbol}</span>
             </span>
         ` : `${escapeHTML(cleanDate)}${timePart}`;
 
@@ -1791,7 +1804,7 @@ function renderRecentDelaysHTML(logs) {
                 const subTimePart = sub.updated_at ? escapeHTML(sub.updated_at) : '';
 
                 rowsHTML += `
-                    <tr class="delay-subrow-${escapeHTML(cleanDate)}" style="display: ${subDisplayStyle}; background: #161b22; border-bottom: 1px dashed #2a313d;">
+                    <tr class="delay-subrow-${escapeHTML(safeKey)}" style="display: ${subDisplayStyle}; background: #161b22; border-bottom: 1px dashed #2a313d;">
                         <td style="padding: 4px 4px 4px 16px; color: #6e7681; font-size: 11px;">↳ ${subTimePart}</td>
                         <td style="padding: 4px; color: ${subColor}; font-size: 11px; font-weight: bold;">${escapeHTML(subDelayText)}</td>
                         <td style="padding: 4px; color: #a5d6ff; font-size: 11px;">${escapeHTML(sub.last_station || sub.position_status || 'In Transit')}</td>
@@ -1807,7 +1820,7 @@ function renderRecentDelaysHTML(logs) {
                 <span>📅 Delay Logs (Last 3 Days)</span>
                 <span style="font-size: 10px; color: #8b949e;">(${dateOrder.length} days recorded)</span>
             </div>
-            <div style="max-height: 180px; overflow-y: auto; margin-top: 8px;">
+            <div class="delay-logs-scroll" style="max-height: 180px; overflow-y: auto; margin-top: 8px;">
                 <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
                     <thead>
                         <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #8b949e;">
@@ -1906,6 +1919,10 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         liveResultHTML = existingResultDiv.innerHTML;
     }
 
+    const prevScrollTop = content.scrollTop;
+    const prevLogScroll = content.querySelector('.delay-logs-scroll');
+    const prevLogScrollTop = prevLogScroll ? prevLogScroll.scrollTop : 0;
+
     content.innerHTML = `
         <div class="detail-row">
             <div class="detail-label">First Station (Origin)</div>
@@ -1936,6 +1953,12 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         <div id="delay-distribution-section">${renderDelayDistributionHTML(train.delay_distribution)}</div>
         <div id="recent-delays-section">${renderRecentDelaysHTML(train.recent_delays)}</div>
     `;
+
+    content.scrollTop = prevScrollTop;
+    const newLogScroll = content.querySelector('.delay-logs-scroll');
+    if (newLogScroll) {
+        newLogScroll.scrollTop = prevLogScrollTop;
+    }
 
     panel.style.display = 'block';
 

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -373,6 +375,48 @@ func TestSearch(t *testing.T) {
 	}
 }
 
+func TestSearchDeduplication(t *testing.T) {
+	srv := setupTestDB(t)
+
+	// Add a second trip with the same trip_short_name '2010' but different trip_id and headsign
+	_, err := srv.db.Exec(`
+		INSERT INTO trips (trip_id, route_id, service_id, trip_short_name, trip_headsign)
+		VALUES ('t2010_alt', 'r1', 'serv1', '2010', 'Vinkovci Express');
+
+		INSERT INTO stop_times (trip_id, arrival_time, departure_time, arrival_seconds, departure_seconds, stop_id, stop_sequence)
+		VALUES ('t2010_alt', '10:00:00', '10:05:00', 36000, 36300, 's1', 1);
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert duplicate trip: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/search?q=2010", nil)
+	w := httptest.NewRecorder()
+
+	srv.Search(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK, got %d", res.StatusCode)
+	}
+
+	var results []SearchResultItem
+	if err := json.NewDecoder(res.Body).Decode(&results); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	trainCount := 0
+	for _, item := range results {
+		if item.Type == "train" && item.TrainNumber == "2010" {
+			trainCount++
+		}
+	}
+
+	if trainCount != 1 {
+		t.Errorf("Expected exactly 1 search result for train 2010, got %d", trainCount)
+	}
+}
+
 func TestGetDashboardStats(t *testing.T) {
 	srv := setupTestDB(t)
 
@@ -412,6 +456,14 @@ func TestGetSegmentsAndDetails(t *testing.T) {
 		t.Fatalf("Expected status OK for GetSegments, got %d", res.StatusCode)
 	}
 
+	etag := res.Header.Get("ETag")
+	if etag == "" {
+		t.Errorf("Expected non-empty ETag header")
+	}
+	if cacheControl := res.Header.Get("Cache-Control"); cacheControl == "" {
+		t.Errorf("Expected non-empty Cache-Control header")
+	}
+
 	var segments []SegmentSpeed
 	if err := json.NewDecoder(res.Body).Decode(&segments); err != nil {
 		t.Fatalf("Failed to decode segments response: %v", err)
@@ -422,6 +474,17 @@ func TestGetSegmentsAndDetails(t *testing.T) {
 	}
 	if len(segments[0].Trains) != 0 {
 		t.Errorf("Expected bulk /api/segments to omit embedded trains array, got %d trains", len(segments[0].Trains))
+	}
+
+	// Test 304 Not Modified when ETag matches If-None-Match
+	req304 := httptest.NewRequest("GET", "/api/segments", nil)
+	req304.Header.Set("If-None-Match", etag)
+	w304 := httptest.NewRecorder()
+	srv.GetSegments(w304, req304)
+
+	res304 := w304.Result()
+	if res304.StatusCode != http.StatusNotModified {
+		t.Errorf("Expected status 304 Not Modified, got %d", res304.StatusCode)
 	}
 
 	// 2. Test GET /api/segments/details
@@ -444,6 +507,42 @@ func TestGetSegmentsAndDetails(t *testing.T) {
 	}
 	if detail.Trains[0].TrainNumber != "2010" {
 		t.Errorf("Expected train number 2010 in segment detail, got %s", detail.Trains[0].TrainNumber)
+	}
+}
+
+func TestLoadOrGenerateSegmentsJSON(t *testing.T) {
+	srv := setupTestDB(t)
+
+	tmpDir, err := os.MkdirTemp("", "segments_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	segmentsPath := filepath.Join(tmpDir, "segments.json")
+
+	// 1. Initial generation (gtfsChanged = true)
+	segs1, err := srv.LoadOrGenerateSegmentsJSON(segmentsPath, true)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateSegmentsJSON failed: %v", err)
+	}
+	if len(segs1) != 1 {
+		t.Fatalf("Expected 1 segment generated, got %d", len(segs1))
+	}
+
+	// Confirm segments.json file was created on disk
+	if _, err := os.Stat(segmentsPath); os.IsNotExist(err) {
+		t.Fatalf("Expected segments.json file to be written to disk")
+	}
+
+	// 2. Subsequent load from disk (gtfsChanged = false)
+	srv.InvalidateSegmentsCache()
+	segs2, err := srv.LoadOrGenerateSegmentsJSON(segmentsPath, false)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateSegmentsJSON from cache failed: %v", err)
+	}
+	if len(segs2) != 1 {
+		t.Fatalf("Expected 1 segment loaded from disk, got %d", len(segs2))
 	}
 }
 
@@ -541,10 +640,16 @@ func TestHistoricalTrainDelaysUniqueChangesOnly(t *testing.T) {
 func TestAutoGenerateMissingArrivals(t *testing.T) {
 	srv := setupTestDB(t)
 
+	// Set stop_times arrival_seconds for t2010 to a time early in the day (0 seconds)
+	_, err := srv.db.Exec(`UPDATE stop_times SET arrival_seconds = 0 WHERE trip_id = 't2010'`)
+	if err != nil {
+		t.Fatalf("Failed to update stop_times for test: %v", err)
+	}
+
 	zgNowStr := getZagrebTime().Format("2006-01-02 15:04:05")
 
 	// Pre-populate train_delays for train 2010 with position_status 'en_route' and 5 min delay
-	_, err := srv.db.Exec(`
+	_, err = srv.db.Exec(`
 		INSERT INTO train_delays (train_number, delay_minutes, position_status, last_station, next_station, updated_at)
 		VALUES ('2010', 5, 'en_route', 's1', 's2', ?)
 	`, zgNowStr)

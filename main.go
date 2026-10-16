@@ -68,7 +68,8 @@ func main() {
 	gtfsURL := ingest.DefaultGTFSURL
 
 	log.Println("Preparing GTFS data and warming track segment cache...")
-	if err := ingest.IngestGTFS(database, gtfsURL, localCacheDir); err != nil {
+	gtfsChanged, err := ingest.IngestGTFS(database, gtfsURL, localCacheDir)
+	if err != nil {
 		log.Printf("Initial GTFS ingestion warning: %v", err)
 	}
 
@@ -80,17 +81,24 @@ func main() {
 		log.Printf("OSM railway ingestion warning: %v", err)
 	}
 
-	// Warm track segment cache synchronously so /api/segments is 100% pre-built in RAM before browser launches
-	segs := server.GetCachedSegments()
-	log.Printf("Track segment cache pre-warmed with %d segments.", len(segs))
+	segmentsJSONPath := filepath.Join(localCacheDir, "segments.json")
+	segs, err := server.LoadOrGenerateSegmentsJSON(segmentsJSONPath, gtfsChanged)
+	if err != nil {
+		log.Printf("Error loading or generating segments.json: %v", err)
+	} else {
+		log.Printf("Track segment cache ready with %d segments.", len(segs))
+	}
 
 	// Background ticker for periodic 24h GTFS updates
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
 		for range ticker.C {
 			log.Println("Periodic 24h ticker: updating GTFS data...")
-			if err := ingest.IngestGTFS(database, gtfsURL, localCacheDir); err != nil {
+			if changed, err := ingest.IngestGTFS(database, gtfsURL, localCacheDir); err != nil {
 				log.Printf("Periodic GTFS ingestion failed: %v", err)
+			} else if changed {
+				log.Println("GTFS data changed, regenerating segments.json...")
+				_, _ = server.LoadOrGenerateSegmentsJSON(segmentsJSONPath, true)
 			}
 		}
 	}()

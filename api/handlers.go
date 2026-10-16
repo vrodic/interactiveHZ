@@ -1,11 +1,14 @@
 package api
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,6 +67,8 @@ type Server struct {
 	delayCache          sync.Map
 	routeCache          sync.Map
 	segmentsCache       []SegmentSpeed
+	segmentsJSON        []byte
+	segmentsEtag        string
 	segmentsMu          sync.RWMutex
 	broadcaster         *Broadcaster
 	delayStatsMu        sync.Mutex
@@ -201,6 +206,42 @@ func (s *Server) SetOSMGraph(graph *OSMGraph) {
 	s.InvalidateSegmentsCache()
 }
 
+func (s *Server) LoadOrGenerateSegmentsJSON(segmentsPath string, gtfsChanged bool) ([]SegmentSpeed, error) {
+	s.segmentsMu.Lock()
+	defer s.segmentsMu.Unlock()
+
+	var rawJSON []byte
+	var segments []SegmentSpeed
+
+	if !gtfsChanged && segmentsPath != "" {
+		if data, err := os.ReadFile(segmentsPath); err == nil && len(data) > 0 {
+			if errUnmarshal := json.Unmarshal(data, &segments); errUnmarshal == nil && len(segments) > 0 {
+				rawJSON = data
+			}
+		}
+	}
+
+	if len(rawJSON) == 0 {
+		segments = s.ComputeSegments()
+		data, err := json.Marshal(segments)
+		if err != nil {
+			return nil, err
+		}
+		rawJSON = data
+
+		if segmentsPath != "" {
+			_ = os.MkdirAll(filepath.Dir(segmentsPath), 0755)
+			_ = os.WriteFile(segmentsPath, rawJSON, 0644)
+		}
+	}
+
+	s.segmentsCache = segments
+	s.segmentsJSON = rawJSON
+	s.segmentsEtag = fmt.Sprintf("\"%x\"", sha256.Sum256(rawJSON))
+
+	return segments, nil
+}
+
 func (s *Server) GetCachedSegments() []SegmentSpeed {
 	s.segmentsMu.RLock()
 	if len(s.segmentsCache) > 0 {
@@ -216,12 +257,17 @@ func (s *Server) GetCachedSegments() []SegmentSpeed {
 		return s.segmentsCache
 	}
 	s.segmentsCache = s.ComputeSegments()
+	data, _ := json.Marshal(s.segmentsCache)
+	s.segmentsJSON = data
+	s.segmentsEtag = fmt.Sprintf("\"%x\"", sha256.Sum256(data))
 	return s.segmentsCache
 }
 
 func (s *Server) InvalidateSegmentsCache() {
 	s.segmentsMu.Lock()
 	s.segmentsCache = nil
+	s.segmentsJSON = nil
+	s.segmentsEtag = ""
 	s.segmentsMu.Unlock()
 }
 
@@ -334,20 +380,26 @@ func (s *Server) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	trRows, err := s.db.Query(`
-		SELECT DISTINCT COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
+		SELECT COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
 		       s.stop_lat, s.stop_lon
 		FROM trips t
 		JOIN stop_times st ON t.trip_id = st.trip_id AND st.stop_sequence = 1
 		JOIN stations s ON st.stop_id = s.stop_id
 		WHERE t.trip_short_name LIKE ? OR t.trip_id LIKE ? OR t.trip_headsign LIKE ?
+		GROUP BY train_num
 		ORDER BY CASE WHEN t.trip_short_name = ? THEN 0 ELSE 1 END, train_num ASC
 		LIMIT 10
 	`, likeQ, likeQ, likeQ, q)
 	if err == nil {
+		seenTrains := make(map[string]bool)
 		for trRows.Next() {
 			var trNum, headsign string
 			var lat, lon float64
 			if err := trRows.Scan(&trNum, &headsign, &lat, &lon); err == nil {
+				if seenTrains[trNum] {
+					continue
+				}
+				seenTrains[trNum] = true
 				sub := "Train"
 				if headsign != "" {
 					sub = "Train - " + headsign
@@ -812,14 +864,13 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
-	cutoffStr := getZagrebTime().Add(-72 * time.Hour).Format("2006-01-02 15:04:05")
+	cutoffDate := getZagrebTime().AddDate(0, 0, -3).Format("2006-01-02")
 	rows, err := s.db.Query(`
 		SELECT delay_date, delay_minutes, COALESCE(position_status, ''), COALESCE(last_station, ''), updated_at
 		FROM historical_train_delays
-		WHERE train_number = ? AND updated_at >= ?
+		WHERE train_number = ? AND (delay_date >= ? OR updated_at >= ?)
 		ORDER BY updated_at DESC, id DESC
-		LIMIT 20
-	`, trainNum, cutoffStr)
+	`, trainNum, cutoffDate, cutoffDate)
 	if err != nil {
 		return []RecentDelayLog{}
 	}
@@ -993,9 +1044,30 @@ func (s *Server) ComputeSegments() []SegmentSpeed {
 }
 
 func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
-	segments := s.GetCachedSegments()
+	s.segmentsMu.RLock()
+	rawJSON := s.segmentsJSON
+	etag := s.segmentsEtag
+	s.segmentsMu.RUnlock()
+
+	if len(rawJSON) == 0 {
+		_ = s.GetCachedSegments()
+		s.segmentsMu.RLock()
+		rawJSON = s.segmentsJSON
+		etag = s.segmentsEtag
+		s.segmentsMu.RUnlock()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(segments)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if etag != "" {
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	w.Write(rawJSON)
 }
 
 func (s *Server) GetSegmentDetails(w http.ResponseWriter, r *http.Request) {
