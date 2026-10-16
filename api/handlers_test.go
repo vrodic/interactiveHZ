@@ -373,6 +373,48 @@ func TestSearch(t *testing.T) {
 	}
 }
 
+func TestSearchDeduplication(t *testing.T) {
+	srv := setupTestDB(t)
+
+	// Add a second trip with the same trip_short_name '2010' but different trip_id and headsign
+	_, err := srv.db.Exec(`
+		INSERT INTO trips (trip_id, route_id, service_id, trip_short_name, trip_headsign)
+		VALUES ('t2010_alt', 'r1', 'serv1', '2010', 'Vinkovci Express');
+
+		INSERT INTO stop_times (trip_id, arrival_time, departure_time, arrival_seconds, departure_seconds, stop_id, stop_sequence)
+		VALUES ('t2010_alt', '10:00:00', '10:05:00', 36000, 36300, 's1', 1);
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert duplicate trip: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/search?q=2010", nil)
+	w := httptest.NewRecorder()
+
+	srv.Search(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status OK, got %d", res.StatusCode)
+	}
+
+	var results []SearchResultItem
+	if err := json.NewDecoder(res.Body).Decode(&results); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	trainCount := 0
+	for _, item := range results {
+		if item.Type == "train" && item.TrainNumber == "2010" {
+			trainCount++
+		}
+	}
+
+	if trainCount != 1 {
+		t.Errorf("Expected exactly 1 search result for train 2010, got %d", trainCount)
+	}
+}
+
 func TestGetDashboardStats(t *testing.T) {
 	srv := setupTestDB(t)
 
@@ -541,10 +583,16 @@ func TestHistoricalTrainDelaysUniqueChangesOnly(t *testing.T) {
 func TestAutoGenerateMissingArrivals(t *testing.T) {
 	srv := setupTestDB(t)
 
+	// Set stop_times arrival_seconds for t2010 to a time early in the day (0 seconds)
+	_, err := srv.db.Exec(`UPDATE stop_times SET arrival_seconds = 0 WHERE trip_id = 't2010'`)
+	if err != nil {
+		t.Fatalf("Failed to update stop_times for test: %v", err)
+	}
+
 	zgNowStr := getZagrebTime().Format("2006-01-02 15:04:05")
 
 	// Pre-populate train_delays for train 2010 with position_status 'en_route' and 5 min delay
-	_, err := srv.db.Exec(`
+	_, err = srv.db.Exec(`
 		INSERT INTO train_delays (train_number, delay_minutes, position_status, last_station, next_station, updated_at)
 		VALUES ('2010', 5, 'en_route', 's1', 's2', ?)
 	`, zgNowStr)

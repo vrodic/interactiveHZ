@@ -334,20 +334,26 @@ func (s *Server) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	trRows, err := s.db.Query(`
-		SELECT DISTINCT COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
+		SELECT COALESCE(t.trip_short_name, t.trip_id) as train_num, COALESCE(t.trip_headsign, ''),
 		       s.stop_lat, s.stop_lon
 		FROM trips t
 		JOIN stop_times st ON t.trip_id = st.trip_id AND st.stop_sequence = 1
 		JOIN stations s ON st.stop_id = s.stop_id
 		WHERE t.trip_short_name LIKE ? OR t.trip_id LIKE ? OR t.trip_headsign LIKE ?
+		GROUP BY train_num
 		ORDER BY CASE WHEN t.trip_short_name = ? THEN 0 ELSE 1 END, train_num ASC
 		LIMIT 10
 	`, likeQ, likeQ, likeQ, q)
 	if err == nil {
+		seenTrains := make(map[string]bool)
 		for trRows.Next() {
 			var trNum, headsign string
 			var lat, lon float64
 			if err := trRows.Scan(&trNum, &headsign, &lat, &lon); err == nil {
+				if seenTrains[trNum] {
+					continue
+				}
+				seenTrains[trNum] = true
 				sub := "Train"
 				if headsign != "" {
 					sub = "Train - " + headsign
@@ -818,7 +824,6 @@ func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
 		FROM historical_train_delays
 		WHERE train_number = ? AND updated_at >= ?
 		ORDER BY updated_at DESC, id DESC
-		LIMIT 20
 	`, trainNum, cutoffStr)
 	if err != nil {
 		return []RecentDelayLog{}
