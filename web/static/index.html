@@ -12,6 +12,7 @@
     <div id="app-container">
         <header id="header">
             <div class="logo-section">
+                <button id="mobile-menu-btn" class="mobile-menu-btn" title="Toggle Menu">☰</button>
                 <span class="logo-badge">HŽ PP</span>
                 <span class="title">Interactive Train Map</span>
             </div>
@@ -39,6 +40,10 @@
                 <span class="sidebar-icon">⚡</span>
                 <span class="sidebar-label">Live Delays</span>
             </button>
+            <button id="toggle-time-controls-btn" class="sidebar-btn" title="Toggle Time Controls">
+                <span class="sidebar-icon">⏱️</span>
+                <span class="sidebar-label">Time Controls</span>
+            </button>
             <button id="enable-notifs-btn" class="sidebar-btn" title="Enable Desktop Notifications">
                 <span class="sidebar-icon">🔔</span>
                 <span class="sidebar-label" id="enable-notifs-label">Enable Notifs</span>
@@ -51,7 +56,7 @@
 
         <div id="map"></div>
 
-        <div id="time-controls">
+        <div id="time-controls" style="display: none;">
             <button id="realtime-btn" class="time-btn active">🔴 Realtime</button>
             <button id="play-btn" class="time-btn">▶ Play</button>
             <select id="speed-select" class="speed-select" title="Playback Speed">
@@ -66,8 +71,11 @@
 
         <div id="side-panel">
             <div class="panel-header">
-                <span class="panel-title">Details</span>
-                <button id="close-panel" class="close-btn">&times;</button>
+                <div id="side-panel-title-container" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <span class="panel-title" id="side-panel-title">Details</span>
+                    <span id="side-panel-badge"></span>
+                </div>
+                <button id="close-panel" class="close-btn" aria-label="Close details">&times;</button>
             </div>
             <div id="panel-content"></div>
         </div>

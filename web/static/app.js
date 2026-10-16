@@ -784,8 +784,34 @@ function initNavHandlers() {
     const dashboardModal = document.getElementById('dashboard-modal');
     const delaysStreamModal = document.getElementById('delays-stream-modal');
     const tripPlannerDrawer = document.getElementById('trip-planner-drawer');
+    const leftSidebar = document.getElementById('left-sidebar');
+    const timeControls = document.getElementById('time-controls');
+    const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const toggleTimeControlsBtn = document.getElementById('toggle-time-controls-btn');
+
+    if (mobileMenuBtn && leftSidebar) {
+        mobileMenuBtn.addEventListener('click', () => {
+            leftSidebar.classList.toggle('mobile-open');
+        });
+    }
+
+    if (toggleTimeControlsBtn && timeControls) {
+        toggleTimeControlsBtn.addEventListener('click', () => {
+            const isHidden = timeControls.style.display === 'none' || !timeControls.style.display;
+            timeControls.style.display = isHidden ? 'flex' : 'none';
+            toggleTimeControlsBtn.classList.toggle('active', isHidden);
+            closeMobileMenu();
+        });
+    }
+
+    function closeMobileMenu() {
+        if (leftSidebar && window.innerWidth <= 768) {
+            leftSidebar.classList.remove('mobile-open');
+        }
+    }
 
     document.getElementById('nav-active-trains').addEventListener('click', () => {
+        closeMobileMenu();
         openActiveTrainsModal();
     });
 
@@ -794,6 +820,7 @@ function initNavHandlers() {
     });
 
     document.getElementById('nav-dashboard').addEventListener('click', () => {
+        closeMobileMenu();
         openDashboardModal();
     });
 
@@ -802,6 +829,7 @@ function initNavHandlers() {
     });
 
     document.getElementById('nav-delays-stream').addEventListener('click', () => {
+        closeMobileMenu();
         openDelaysStreamModal();
     });
 
@@ -848,6 +876,7 @@ function initNavHandlers() {
     }
 
     document.getElementById('nav-routes').addEventListener('click', () => {
+        closeMobileMenu();
         tripPlannerDrawer.style.display = 'flex';
     });
 
@@ -1542,6 +1571,11 @@ function openTrainDetails(train) {
 async function fetchAndDisplayTrainDetails(trainNum) {
     const panel = document.getElementById('side-panel');
     const content = document.getElementById('panel-content');
+    const titleEl = document.getElementById('side-panel-title');
+    const badgeEl = document.getElementById('side-panel-badge');
+
+    if (titleEl) titleEl.textContent = `🚆 Train ${trainNum}`;
+    if (badgeEl) badgeEl.innerHTML = '';
 
     panel.style.display = 'block';
     content.innerHTML = `<p style="color: #a0aec0; text-align: center; padding: 20px;">Loading details for Train ${escapeHTML(trainNum)}...</p>`;
@@ -1588,11 +1622,10 @@ async function fetchAndDisplayTrainDetails(trainNum) {
             ? `<span class="badge badge-delay">+${data.delay_minutes} min delay</span>`
             : `<span class="badge ${statusBadgeClass}">${escapeHTML(statusStr)}</span>`;
 
+        if (titleEl) titleEl.textContent = `🚆 Train ${data.train_number}`;
+        if (badgeEl) badgeEl.innerHTML = delayBadge;
+
         content.innerHTML = `
-            <div class="panel-header">
-                <div class="panel-title">🚆 Train ${escapeHTML(data.train_number)}</div>
-                ${delayBadge}
-            </div>
             <div class="detail-row">
                 <div class="detail-label">First Station (Origin)</div>
                 <div class="detail-value">🚩 ${escapeHTML(data.first_station_name)}</div>
@@ -1840,6 +1873,8 @@ function renderDelayDistributionHTML(dist) {
 function updateTrainDetailsPanel(train, isNewOpen = false) {
     const panel = document.getElementById('side-panel');
     const content = document.getElementById('panel-content');
+    const titleEl = document.getElementById('side-panel-title');
+    const badgeEl = document.getElementById('side-panel-badge');
 
     const trNum = train.train_number || train.trip_id;
 
@@ -1859,6 +1894,9 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         ? `<span class="badge badge-delay">+${train.delay_minutes} min delay</span>`
         : `<span class="badge badge-on-time">Active on Route</span>`;
 
+    if (titleEl) titleEl.textContent = `🚆 Train ${train.train_number}`;
+    if (badgeEl) badgeEl.innerHTML = delayBadge;
+
     const originStation = escapeHTML(train.first_station_name || 'Origin Station');
     const destStation = escapeHTML(train.last_station_name || 'Destination Station');
 
@@ -1869,10 +1907,6 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
     }
 
     content.innerHTML = `
-        <div class="panel-header">
-            <div class="panel-title">🚆 Train ${escapeHTML(train.train_number)}</div>
-            ${delayBadge}
-        </div>
         <div class="detail-row">
             <div class="detail-label">First Station (Origin)</div>
             <div class="detail-value">🚩 ${originStation}</div>
