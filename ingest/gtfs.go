@@ -21,7 +21,7 @@ import (
 
 const DefaultGTFSURL = "https://www.hzpp.hr/GTFS_files.zip"
 
-func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
+func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) (bool, error) {
 	log.Println("Starting GTFS ingestion check...")
 
 	var zipData []byte
@@ -49,7 +49,7 @@ func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
 				_ = sqlDB.QueryRow("SELECT COUNT(*) FROM stations").Scan(&count)
 				if count > 0 {
 					log.Printf("Downloaded GTFS SHA-256 checksum (%s) matches cached file. Skipping disk write and DB re-ingestion.", downloadHash[:12])
-					return nil
+					return false, nil
 				}
 			}
 
@@ -71,12 +71,12 @@ func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
 	}
 
 	if len(zipData) == 0 {
-		return fmt.Errorf("no GTFS data available (download failed and no local cache found)")
+		return false, fmt.Errorf("no GTFS data available (download failed and no local cache found)")
 	}
 
 	zipReader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
 	if err != nil {
-		return fmt.Errorf("failed to open GTFS zip reader: %w", err)
+		return false, fmt.Errorf("failed to open GTFS zip reader: %w", err)
 	}
 
 	fileMap := make(map[string]*zip.File)
@@ -86,7 +86,7 @@ func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
 
 	tx, err := sqlDB.Begin()
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return false, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -99,27 +99,27 @@ func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
 
 	if f, ok := fileMap["stops.txt"]; ok {
 		if err := loadStops(tx, f); err != nil {
-			return fmt.Errorf("failed to load stops: %w", err)
+			return false, fmt.Errorf("failed to load stops: %w", err)
 		}
 	} else {
-		return fmt.Errorf("stops.txt missing from GTFS zip")
+		return false, fmt.Errorf("stops.txt missing from GTFS zip")
 	}
 
 	if f, ok := fileMap["routes.txt"]; ok {
 		if err := loadRoutes(tx, f); err != nil {
-			return fmt.Errorf("failed to load routes: %w", err)
+			return false, fmt.Errorf("failed to load routes: %w", err)
 		}
 	}
 
 	if f, ok := fileMap["trips.txt"]; ok {
 		if err := loadTrips(tx, f); err != nil {
-			return fmt.Errorf("failed to load trips: %w", err)
+			return false, fmt.Errorf("failed to load trips: %w", err)
 		}
 	}
 
 	if f, ok := fileMap["calendar.txt"]; ok {
 		if err := loadCalendar(tx, f); err != nil {
-			return fmt.Errorf("failed to load calendar: %w", err)
+			return false, fmt.Errorf("failed to load calendar: %w", err)
 		}
 	}
 
@@ -131,18 +131,18 @@ func IngestGTFS(sqlDB *sql.DB, gtfsURL string, localCacheDir string) error {
 
 	if f, ok := fileMap["stop_times.txt"]; ok {
 		if err := loadStopTimes(tx, f); err != nil {
-			return fmt.Errorf("failed to load stop_times: %w", err)
+			return false, fmt.Errorf("failed to load stop_times: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return false, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	log.Println("GTFS ingestion completed successfully. Pre-aggregating route_segments summary table...")
 	_ = db.PopulateRouteSegments(sqlDB)
 
-	return nil
+	return true, nil
 }
 
 func downloadGTFS(url string) ([]byte, error) {

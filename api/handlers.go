@@ -1,11 +1,14 @@
 package api
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,6 +67,8 @@ type Server struct {
 	delayCache          sync.Map
 	routeCache          sync.Map
 	segmentsCache       []SegmentSpeed
+	segmentsJSON        []byte
+	segmentsEtag        string
 	segmentsMu          sync.RWMutex
 	broadcaster         *Broadcaster
 	delayStatsMu        sync.Mutex
@@ -201,6 +206,42 @@ func (s *Server) SetOSMGraph(graph *OSMGraph) {
 	s.InvalidateSegmentsCache()
 }
 
+func (s *Server) LoadOrGenerateSegmentsJSON(segmentsPath string, gtfsChanged bool) ([]SegmentSpeed, error) {
+	s.segmentsMu.Lock()
+	defer s.segmentsMu.Unlock()
+
+	var rawJSON []byte
+	var segments []SegmentSpeed
+
+	if !gtfsChanged && segmentsPath != "" {
+		if data, err := os.ReadFile(segmentsPath); err == nil && len(data) > 0 {
+			if errUnmarshal := json.Unmarshal(data, &segments); errUnmarshal == nil && len(segments) > 0 {
+				rawJSON = data
+			}
+		}
+	}
+
+	if len(rawJSON) == 0 {
+		segments = s.ComputeSegments()
+		data, err := json.Marshal(segments)
+		if err != nil {
+			return nil, err
+		}
+		rawJSON = data
+
+		if segmentsPath != "" {
+			_ = os.MkdirAll(filepath.Dir(segmentsPath), 0755)
+			_ = os.WriteFile(segmentsPath, rawJSON, 0644)
+		}
+	}
+
+	s.segmentsCache = segments
+	s.segmentsJSON = rawJSON
+	s.segmentsEtag = fmt.Sprintf("\"%x\"", sha256.Sum256(rawJSON))
+
+	return segments, nil
+}
+
 func (s *Server) GetCachedSegments() []SegmentSpeed {
 	s.segmentsMu.RLock()
 	if len(s.segmentsCache) > 0 {
@@ -216,12 +257,17 @@ func (s *Server) GetCachedSegments() []SegmentSpeed {
 		return s.segmentsCache
 	}
 	s.segmentsCache = s.ComputeSegments()
+	data, _ := json.Marshal(s.segmentsCache)
+	s.segmentsJSON = data
+	s.segmentsEtag = fmt.Sprintf("\"%x\"", sha256.Sum256(data))
 	return s.segmentsCache
 }
 
 func (s *Server) InvalidateSegmentsCache() {
 	s.segmentsMu.Lock()
 	s.segmentsCache = nil
+	s.segmentsJSON = nil
+	s.segmentsEtag = ""
 	s.segmentsMu.Unlock()
 }
 
@@ -998,9 +1044,30 @@ func (s *Server) ComputeSegments() []SegmentSpeed {
 }
 
 func (s *Server) GetSegments(w http.ResponseWriter, r *http.Request) {
-	segments := s.GetCachedSegments()
+	s.segmentsMu.RLock()
+	rawJSON := s.segmentsJSON
+	etag := s.segmentsEtag
+	s.segmentsMu.RUnlock()
+
+	if len(rawJSON) == 0 {
+		_ = s.GetCachedSegments()
+		s.segmentsMu.RLock()
+		rawJSON = s.segmentsJSON
+		etag = s.segmentsEtag
+		s.segmentsMu.RUnlock()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(segments)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if etag != "" {
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	w.Write(rawJSON)
 }
 
 func (s *Server) GetSegmentDetails(w http.ResponseWriter, r *http.Request) {

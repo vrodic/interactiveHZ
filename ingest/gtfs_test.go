@@ -66,9 +66,12 @@ func TestIngestGTFS(t *testing.T) {
 		t.Fatalf("Failed to write test zip: %v", err)
 	}
 
-	err = IngestGTFS(database, "", tmpDir)
+	changed, err := IngestGTFS(database, "", tmpDir)
 	if err != nil {
 		t.Fatalf("IngestGTFS failed: %v", err)
+	}
+	if !changed {
+		t.Errorf("Expected changed to be true for initial ingestion")
 	}
 
 	var count int

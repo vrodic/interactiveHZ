@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -454,6 +456,14 @@ func TestGetSegmentsAndDetails(t *testing.T) {
 		t.Fatalf("Expected status OK for GetSegments, got %d", res.StatusCode)
 	}
 
+	etag := res.Header.Get("ETag")
+	if etag == "" {
+		t.Errorf("Expected non-empty ETag header")
+	}
+	if cacheControl := res.Header.Get("Cache-Control"); cacheControl == "" {
+		t.Errorf("Expected non-empty Cache-Control header")
+	}
+
 	var segments []SegmentSpeed
 	if err := json.NewDecoder(res.Body).Decode(&segments); err != nil {
 		t.Fatalf("Failed to decode segments response: %v", err)
@@ -464,6 +474,17 @@ func TestGetSegmentsAndDetails(t *testing.T) {
 	}
 	if len(segments[0].Trains) != 0 {
 		t.Errorf("Expected bulk /api/segments to omit embedded trains array, got %d trains", len(segments[0].Trains))
+	}
+
+	// Test 304 Not Modified when ETag matches If-None-Match
+	req304 := httptest.NewRequest("GET", "/api/segments", nil)
+	req304.Header.Set("If-None-Match", etag)
+	w304 := httptest.NewRecorder()
+	srv.GetSegments(w304, req304)
+
+	res304 := w304.Result()
+	if res304.StatusCode != http.StatusNotModified {
+		t.Errorf("Expected status 304 Not Modified, got %d", res304.StatusCode)
 	}
 
 	// 2. Test GET /api/segments/details
@@ -486,6 +507,42 @@ func TestGetSegmentsAndDetails(t *testing.T) {
 	}
 	if detail.Trains[0].TrainNumber != "2010" {
 		t.Errorf("Expected train number 2010 in segment detail, got %s", detail.Trains[0].TrainNumber)
+	}
+}
+
+func TestLoadOrGenerateSegmentsJSON(t *testing.T) {
+	srv := setupTestDB(t)
+
+	tmpDir, err := os.MkdirTemp("", "segments_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	segmentsPath := filepath.Join(tmpDir, "segments.json")
+
+	// 1. Initial generation (gtfsChanged = true)
+	segs1, err := srv.LoadOrGenerateSegmentsJSON(segmentsPath, true)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateSegmentsJSON failed: %v", err)
+	}
+	if len(segs1) != 1 {
+		t.Fatalf("Expected 1 segment generated, got %d", len(segs1))
+	}
+
+	// Confirm segments.json file was created on disk
+	if _, err := os.Stat(segmentsPath); os.IsNotExist(err) {
+		t.Fatalf("Expected segments.json file to be written to disk")
+	}
+
+	// 2. Subsequent load from disk (gtfsChanged = false)
+	srv.InvalidateSegmentsCache()
+	segs2, err := srv.LoadOrGenerateSegmentsJSON(segmentsPath, false)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateSegmentsJSON from cache failed: %v", err)
+	}
+	if len(segs2) != 1 {
+		t.Fatalf("Expected 1 segment loaded from disk, got %d", len(segs2))
 	}
 }
 
