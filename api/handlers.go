@@ -864,13 +864,13 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
-	cutoffStr := getZagrebTime().Add(-72 * time.Hour).Format("2006-01-02 15:04:05")
+	cutoffDate := getZagrebTime().AddDate(0, 0, -3).Format("2006-01-02")
 	rows, err := s.db.Query(`
 		SELECT delay_date, delay_minutes, COALESCE(position_status, ''), COALESCE(last_station, ''), updated_at
 		FROM historical_train_delays
-		WHERE train_number = ? AND updated_at >= ?
+		WHERE train_number = ? AND (delay_date >= ? OR updated_at >= ?)
 		ORDER BY updated_at DESC, id DESC
-	`, trainNum, cutoffStr)
+	`, trainNum, cutoffDate, cutoffDate)
 	if err != nil {
 		return []RecentDelayLog{}
 	}
