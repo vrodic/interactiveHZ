@@ -886,7 +886,20 @@ func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
 		var l RecentDelayLog
 		var rawUpdatedAt string
 		if err := rows.Scan(&l.DelayDate, &l.DelayMinutes, &l.PositionStatus, &l.LastStation, &rawUpdatedAt); err == nil {
-			parsedTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", rawUpdatedAt, loc)
+			var parsedTime time.Time
+			var parseErr error
+			formats := []string{
+				"2006-01-02 15:04:05",
+				time.RFC3339,
+				"2006-01-02T15:04:05Z",
+				"2006-01-02T15:04:05",
+			}
+			for _, f := range formats {
+				parsedTime, parseErr = time.ParseInLocation(f, rawUpdatedAt, loc)
+				if parseErr == nil {
+					break
+				}
+			}
 			if parseErr == nil {
 				l.UpdatedAt = parsedTime.Format("15:04")
 			} else {
@@ -895,6 +908,18 @@ func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
 					timeParts := strings.Split(parts[1], ":")
 					if len(timeParts) >= 2 {
 						l.UpdatedAt = timeParts[0] + ":" + timeParts[1]
+					} else {
+						l.UpdatedAt = rawUpdatedAt
+					}
+				} else if strings.Contains(rawUpdatedAt, "T") {
+					tParts := strings.Split(rawUpdatedAt, "T")
+					if len(tParts) > 1 {
+						timeParts := strings.Split(tParts[1], ":")
+						if len(timeParts) >= 2 {
+							l.UpdatedAt = timeParts[0] + ":" + timeParts[1]
+						} else {
+							l.UpdatedAt = rawUpdatedAt
+						}
 					} else {
 						l.UpdatedAt = rawUpdatedAt
 					}
