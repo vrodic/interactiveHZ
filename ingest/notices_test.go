@@ -15,7 +15,8 @@ func TestParseNoticesSampleHTML(t *testing.T) {
 	`
 
 	allStations := []string{"Zagreb GK", "Zagreb Borongaj", "Dugo Selo", "Rijeka", "Split"}
-	items := parseNoticesFromHTML("works", sampleHTML, allStations, nil)
+	validTrains := map[string]bool{"4600": true, "4603": true}
+	items := parseNoticesFromHTML("works", sampleHTML, allStations, validTrains, nil)
 
 	if len(items) == 0 {
 		t.Fatalf("Expected parsed notice items, got 0")
@@ -51,5 +52,9 @@ func TestParseNoticesSampleHTML(t *testing.T) {
 
 	if len(item.PDFURLs) != 1 {
 		t.Errorf("Expected 1 PDF URL, got %d", len(item.PDFURLs))
+	}
+
+	if len(item.DatesJSON) == 0 {
+		t.Errorf("Expected extracted dates in DatesJSON, got empty")
 	}
 }

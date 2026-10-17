@@ -478,7 +478,8 @@ func (s *Server) Search(w http.ResponseWriter, r *http.Request) {
 func (s *Server) GetNotices(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT id, category, title, content, parsed_stations, parsed_trains, pdf_urls,
-		       is_bus_replacement, is_track_works, COALESCE(date_from, ''), COALESCE(date_to, ''), updated_at
+		       is_bus_replacement, is_track_works, COALESCE(date_from, ''), COALESCE(date_to, ''),
+		       COALESCE(dates_json, '[]'), updated_at
 		FROM traffic_notices
 		ORDER BY is_track_works DESC, is_bus_replacement DESC, id ASC
 	`)
@@ -491,16 +492,17 @@ func (s *Server) GetNotices(w http.ResponseWriter, r *http.Request) {
 	notices := make([]NoticeResponse, 0)
 	for rows.Next() {
 		var n NoticeResponse
-		var stJSON, trJSON, pdfJSON string
+		var stJSON, trJSON, pdfJSON, datesJSONStr string
 		var isBus, isWorks int
 
-		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &n.UpdatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &datesJSONStr, &n.UpdatedAt); err != nil {
 			continue
 		}
 
 		_ = json.Unmarshal([]byte(stJSON), &n.ParsedStations)
 		_ = json.Unmarshal([]byte(trJSON), &n.ParsedTrains)
 		_ = json.Unmarshal([]byte(pdfJSON), &n.PDFURLs)
+		_ = json.Unmarshal([]byte(datesJSONStr), &n.DatesJSON)
 
 		n.IsBusReplacement = isBus == 1
 		n.IsTrackWorks = isWorks == 1
@@ -515,7 +517,8 @@ func (s *Server) GetNotices(w http.ResponseWriter, r *http.Request) {
 func (s *Server) fetchNoticesFromDB() []NoticeResponse {
 	rows, err := s.db.Query(`
 		SELECT id, category, title, content, parsed_stations, parsed_trains, pdf_urls,
-		       is_bus_replacement, is_track_works, COALESCE(date_from, ''), COALESCE(date_to, ''), updated_at
+		       is_bus_replacement, is_track_works, COALESCE(date_from, ''), COALESCE(date_to, ''),
+		       COALESCE(dates_json, '[]'), updated_at
 		FROM traffic_notices
 	`)
 	if err != nil {
@@ -526,13 +529,14 @@ func (s *Server) fetchNoticesFromDB() []NoticeResponse {
 	var notices []NoticeResponse
 	for rows.Next() {
 		var n NoticeResponse
-		var stJSON, trJSON, pdfJSON string
+		var stJSON, trJSON, pdfJSON, datesJSONStr string
 		var isBus, isWorks int
 
-		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &n.UpdatedAt); err == nil {
+		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &datesJSONStr, &n.UpdatedAt); err == nil {
 			_ = json.Unmarshal([]byte(stJSON), &n.ParsedStations)
 			_ = json.Unmarshal([]byte(trJSON), &n.ParsedTrains)
 			_ = json.Unmarshal([]byte(pdfJSON), &n.PDFURLs)
+			_ = json.Unmarshal([]byte(datesJSONStr), &n.DatesJSON)
 			n.IsBusReplacement = isBus == 1
 			n.IsTrackWorks = isWorks == 1
 			notices = append(notices, n)
@@ -682,6 +686,9 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 				}
 				if n.IsTrackWorks {
 					entry.IsTrackWorks = true
+				}
+				if entry.NoticeID == "" {
+					entry.NoticeID = n.ID
 				}
 			}
 		}

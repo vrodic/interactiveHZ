@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ type NoticeItem struct {
 	IsTrackWorks     bool     `json:"is_track_works"`
 	DateFrom         string   `json:"date_from,omitempty"`
 	DateTo           string   `json:"date_to,omitempty"`
+	DatesJSON        []string `json:"dates_json,omitempty"`
 	UpdatedAt        string   `json:"updated_at"`
 }
 
@@ -46,18 +48,35 @@ var (
 )
 
 var (
-	trainNumRegex  = regexp.MustCompile(`\b[1-9]\d{3,4}\b`)
+	trainNumRegex  = regexp.MustCompile(`\b[1-9]\d{2,4}\b`)
 	pdfURLRegex    = regexp.MustCompile(`https?://www\.hzpp\.hr/api/v1/repository/download/[a-f0-9\-]+`)
 	buttonTagRegex = regexp.MustCompile(`(?i)<button[^>]*>`)
+
+	croatianMonths = map[string]string{
+		"siječanj": "01", "siječnja": "01", "siječnju": "01",
+		"veljača": "02", "veljače": "02", "veljači": "02",
+		"ožujak": "03", "ožujka": "03", "ožujku": "03",
+		"travanj": "04", "travnja": "04", "travnju": "04",
+		"svibanj": "05", "svibnja": "05", "svibnju": "05",
+		"lipanj": "06", "lipnja": "06", "lipnju": "06",
+		"srpanj": "07", "srpnja": "07", "srpnju": "07",
+		"kolovoz": "08", "kolovoza": "08", "kolovozu": "08",
+		"rujan": "09", "rujna": "09", "rujnu": "09",
+		"listopad": "10", "listopada": "10", "listopadu": "10",
+		"studeni": "11", "studenoga": "11", "studenom": "11",
+		"prosinac": "12", "prosinca": "12", "prosinci": "12",
+	}
 )
 
 func FetchAndProcessNotices(database *sql.DB, allStations []string) error {
-	infoChanged, infoItems, err := scrapePage("info", "https://www.hzpp.hr/hr/informacije?type=info", database, allStations)
+	validTrainNums := fetchValidTrainNumbers(database)
+
+	infoChanged, infoItems, err := scrapePage("info", "https://www.hzpp.hr/hr/informacije?type=info", database, allStations, validTrainNums)
 	if err != nil {
 		log.Printf("Error scraping info page: %v", err)
 	}
 
-	worksChanged, worksItems, err := scrapePage("works", "https://www.hzpp.hr/hr/informacije?type=works", database, allStations)
+	worksChanged, worksItems, err := scrapePage("works", "https://www.hzpp.hr/hr/informacije?type=works", database, allStations, validTrainNums)
 	if err != nil {
 		log.Printf("Error scraping works page: %v", err)
 	}
@@ -76,7 +95,31 @@ func FetchAndProcessNotices(database *sql.DB, allStations []string) error {
 	return nil
 }
 
-func scrapePage(category string, pageURL string, database *sql.DB, allStations []string) (bool, []NoticeItem, error) {
+func fetchValidTrainNumbers(database *sql.DB) map[string]bool {
+	validMap := make(map[string]bool)
+	rows, err := database.Query(`
+		SELECT DISTINCT trip_short_name FROM trips WHERE trip_short_name IS NOT NULL AND trip_short_name != ''
+		UNION
+		SELECT DISTINCT trip_id FROM trips WHERE trip_id IS NOT NULL AND trip_id != ''
+	`)
+	if err != nil {
+		return validMap
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var num string
+		if err := rows.Scan(&num); err == nil {
+			num = strings.TrimSpace(num)
+			if num != "" {
+				validMap[num] = true
+			}
+		}
+	}
+	return validMap
+}
+
+func scrapePage(category string, pageURL string, database *sql.DB, allStations []string, validTrainNums map[string]bool) (bool, []NoticeItem, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, err := http.NewRequest("GET", pageURL, nil)
 	if err != nil {
@@ -115,15 +158,14 @@ func scrapePage(category string, pageURL string, database *sql.DB, allStations [
 	noticeHashesMu.Unlock()
 
 	htmlText := string(bodyBytes)
-	items := parseNoticesFromHTML(category, htmlText, allStations, client)
+	items := parseNoticesFromHTML(category, htmlText, allStations, validTrainNums, client)
 
 	return true, items, nil
 }
 
-func parseNoticesFromHTML(category string, html string, allStations []string, client *http.Client) []NoticeItem {
+func parseNoticesFromHTML(category string, html string, allStations []string, validTrainNums map[string]bool, client *http.Client) []NoticeItem {
 	var items []NoticeItem
 
-	// Split by accordion button or main sections
 	sections := buttonTagRegex.Split(html, -1)
 	if len(sections) <= 1 {
 		sections = []string{html}
@@ -138,7 +180,6 @@ func parseNoticesFromHTML(category string, html string, allStations []string, cl
 			continue
 		}
 
-		// Check if section looks like a notice header or notice content
 		lines := strings.Split(cleanText, "\n")
 		var title string
 		var contentLines []string
@@ -158,28 +199,65 @@ func parseNoticesFromHTML(category string, html string, allStations []string, cl
 			continue
 		}
 
+		// Noise title filtering
+		titleLower := strings.ToLower(title)
+		if strings.Contains(titleLower, "kontakt") ||
+			strings.Contains(titleLower, "korisnički centar") ||
+			strings.Contains(titleLower, "korisnicki centar") ||
+			strings.Contains(titleLower, "prava putnika") ||
+			strings.Contains(titleLower, "pritužbe") ||
+			strings.Contains(titleLower, "povrat novca") {
+			continue
+		}
+
 		content := strings.Join(contentLines, "\n")
 		fullSectionText := sec + "\n" + cleanText
 
 		pdfURLs := extractPDFURLs(fullSectionText)
-		trains := extractTrainNumbers(fullSectionText)
+		rawTrains := extractTrainNumbers(fullSectionText)
 		stations := extractStations(fullSectionText, allStations)
 
-		// Check for embedded JSON in section
+		// Check embedded JSON
 		embeddedStations, dateFrom, dateTo := extractEmbeddedJSONData(sec)
 		if len(embeddedStations) > 0 {
 			stations = mergeUnique(stations, embeddedStations)
 		}
 
-		// Download and parse PDFs if present to enrich train numbers
+		// Download and parse PDFs if present
 		if client != nil {
 			for _, pdfURL := range pdfURLs {
 				pdfTrains := extractTrainsFromPDF(client, pdfURL)
 				if len(pdfTrains) > 0 {
-					trains = mergeUnique(trains, pdfTrains)
+					rawTrains = mergeUnique(rawTrains, pdfTrains)
 				}
 			}
 		}
+
+		// Filter trains against valid database GTFS train numbers
+		var validTrains []string
+		for _, tr := range rawTrains {
+			if validTrainNums[tr] {
+				validTrains = append(validTrains, tr)
+			}
+		}
+
+		// Parse dates from text
+		datesList, dfText, dtText := parseDatesFromText(cleanText)
+		if dateFrom == "" {
+			dateFrom = dfText
+		}
+		if dateTo == "" {
+			dateTo = dtText
+		}
+
+		// Combine embedded dates with text dates
+		if dateFrom != "" && !containsString(datesList, dateFrom) {
+			datesList = append(datesList, dateFrom)
+		}
+		if dateTo != "" && !containsString(datesList, dateTo) {
+			datesList = append(datesList, dateTo)
+		}
+		sort.Strings(datesList)
 
 		isBus := strings.Contains(strings.ToLower(fullSectionText), "autobus") ||
 			strings.Contains(strings.ToLower(fullSectionText), "zamjensk") ||
@@ -190,8 +268,8 @@ func parseNoticesFromHTML(category string, html string, allStations []string, cl
 			strings.Contains(strings.ToLower(fullSectionText), "zatvoren") ||
 			strings.Contains(strings.ToLower(fullSectionText), "održavanj")
 
-		// Filter out noise sections
-		if len(stations) == 0 && len(trains) == 0 && !isBus && !isTrackWorks {
+		// Strict filtering: require at least 1 mapped station or train, OR clear bus/works designation
+		if len(stations) == 0 && len(validTrains) == 0 {
 			continue
 		}
 
@@ -203,17 +281,81 @@ func parseNoticesFromHTML(category string, html string, allStations []string, cl
 			Title:            title,
 			Content:          content,
 			ParsedStations:   stations,
-			ParsedTrains:     trains,
+			ParsedTrains:     validTrains,
 			PDFURLs:          pdfURLs,
 			IsBusReplacement: isBus,
 			IsTrackWorks:     isTrackWorks,
 			DateFrom:         dateFrom,
 			DateTo:           dateTo,
+			DatesJSON:        datesList,
 			UpdatedAt:        time.Now().In(time.Local).Format("2006-01-02 15:04:05"),
 		})
 	}
 
 	return items
+}
+
+func parseDatesFromText(text string) ([]string, string, string) {
+	var dates []string
+	var df, dt string
+
+	lower := strings.ToLower(text)
+	nowYear := time.Now().Year()
+
+	// Pattern 1: od DD. [month] do DD. [month] YYYY.
+	// Pattern 2: DD., DD. i DD. [month] YYYY.
+	// Pattern 3: DD.MM.YYYY. - DD.MM.YYYY.
+	// Pattern 4: DD.MM.YYYY.
+
+	// Extract explicit YYYY-MM-DD pattern: DD.MM.YYYY.
+	reIsoDate := regexp.MustCompile(`\b(\d{1,2})\.(\d{1,2})\.(\d{4})\.?`)
+	matchesIso := reIsoDate.FindAllStringSubmatch(text, -1)
+	for _, m := range matchesIso {
+		day, _ := strconv.Atoi(m[1])
+		month, _ := strconv.Atoi(m[2])
+		year, _ := strconv.Atoi(m[3])
+		formatted := fmt.Sprintf("%04d-%02d-%02d", year, month, day)
+		dates = append(dates, formatted)
+	}
+
+	// Extract Croatian text dates with month names e.g. "22., 23., 26. i 27. listopada 2026."
+	reMonthText := regexp.MustCompile(`((?:\d{1,2}\.\s*(?:,\s*|i\s*|do\s*)?)+)\s*([a-čćžšđA-ČĆŽŠĐ]+)\s*(\d{4})?\.?`)
+	matchesMonth := reMonthText.FindAllStringSubmatch(lower, -1)
+	for _, m := range matchesMonth {
+		daysRaw := m[1]
+		monthName := m[2]
+		yearStr := m[3]
+
+		monthNum, ok := croatianMonths[monthName]
+		if !ok {
+			continue
+		}
+
+		year := nowYear
+		if yearStr != "" {
+			if y, err := strconv.Atoi(yearStr); err == nil {
+				year = y
+			}
+		}
+
+		reDayNum := regexp.MustCompile(`\b\d{1,2}\b`)
+		dayNums := reDayNum.FindAllString(daysRaw, -1)
+		for _, dStr := range dayNums {
+			day, _ := strconv.Atoi(dStr)
+			formatted := fmt.Sprintf("%04d-%s-%02d", year, monthNum, day)
+			dates = append(dates, formatted)
+		}
+	}
+
+	dates = uniqueStrings(dates)
+	sort.Strings(dates)
+
+	if len(dates) > 0 {
+		df = dates[0]
+		dt = dates[len(dates)-1]
+	}
+
+	return dates, df, dt
 }
 
 func extractPDFURLs(html string) []string {
@@ -225,7 +367,6 @@ func extractTrainNumbers(text string) []string {
 	rawMatches := trainNumRegex.FindAllString(text, -1)
 	var filtered []string
 	for _, m := range rawMatches {
-		// Avoid matching zip codes or years like 2026, 10000, 41000
 		if m == "2024" || m == "2025" || m == "2026" || m == "2027" || strings.HasSuffix(m, "000") {
 			continue
 		}
@@ -245,7 +386,6 @@ func extractStations(text string, allStations []string) []string {
 		}
 		stLower := strings.ToLower(stClean)
 
-		// Word boundary check in lower text
 		if strings.Contains(lowerText, stLower) {
 			found = append(found, stClean)
 		}
@@ -254,18 +394,15 @@ func extractStations(text string, allStations []string) []string {
 }
 
 func extractEmbeddedJSONData(sec string) ([]string, string, string) {
-	// Look for {{ ... }} in html
 	startIdx := strings.Index(sec, "{{")
 	endIdx := strings.Index(sec, "}}")
 
 	if startIdx != -1 && endIdx > startIdx {
 		jsonStr := sec[startIdx+2 : endIdx]
-		// Clean html tags like <br />, &nbsp; inside json snippet
 		jsonStr = stripHTMLTags(jsonStr)
 		jsonStr = strings.ReplaceAll(jsonStr, "&nbsp;", " ")
 		jsonStr = strings.TrimSpace(jsonStr)
 
-		// Fix trailing commas in JSON array/object before closing brackets
 		reTrailingComma := regexp.MustCompile(`,(\s*[\]}])`)
 		jsonStr = reTrailingComma.ReplaceAllString(jsonStr, "$1")
 
@@ -300,7 +437,6 @@ func extractTrainsFromPDF(client *http.Client, pdfURL string) []string {
 		return nil
 	}
 
-	// PDF binary parsing for train numbers in text streams
 	text := string(data)
 	return extractTrainNumbers(text)
 }
@@ -312,7 +448,6 @@ func saveNoticesToDB(database *sql.DB, notices []NoticeItem) error {
 	}
 	defer tx.Rollback()
 
-	// Clear previous notices to sync
 	if _, err := tx.Exec("DELETE FROM traffic_notices"); err != nil {
 		return err
 	}
@@ -320,8 +455,8 @@ func saveNoticesToDB(database *sql.DB, notices []NoticeItem) error {
 	stmt, err := tx.Prepare(`
 		INSERT INTO traffic_notices (
 			id, category, title, content, parsed_stations, parsed_trains, pdf_urls,
-			is_bus_replacement, is_track_works, date_from, date_to, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			is_bus_replacement, is_track_works, date_from, date_to, dates_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -332,6 +467,7 @@ func saveNoticesToDB(database *sql.DB, notices []NoticeItem) error {
 		stationsJSON, _ := json.Marshal(n.ParsedStations)
 		trainsJSON, _ := json.Marshal(n.ParsedTrains)
 		pdfsJSON, _ := json.Marshal(n.PDFURLs)
+		datesJSON, _ := json.Marshal(n.DatesJSON)
 
 		isBusInt := 0
 		if n.IsBusReplacement {
@@ -345,7 +481,7 @@ func saveNoticesToDB(database *sql.DB, notices []NoticeItem) error {
 		_, err := stmt.Exec(
 			n.ID, n.Category, n.Title, n.Content,
 			string(stationsJSON), string(trainsJSON), string(pdfsJSON),
-			isBusInt, isWorksInt, n.DateFrom, n.DateTo, n.UpdatedAt,
+			isBusInt, isWorksInt, n.DateFrom, n.DateTo, string(datesJSON), n.UpdatedAt,
 		)
 		if err != nil {
 			log.Printf("Warning: error inserting notice %s: %v", n.ID, err)
@@ -357,7 +493,6 @@ func saveNoticesToDB(database *sql.DB, notices []NoticeItem) error {
 
 func StartNoticesBackgroundWorker(database *sql.DB, getStationsFunc func() []string) {
 	go func() {
-		// Initial fetch on startup
 		stations := getStationsFunc()
 		if err := FetchAndProcessNotices(database, stations); err != nil {
 			log.Printf("Startup notice fetch warning: %v", err)
@@ -368,7 +503,6 @@ func StartNoticesBackgroundWorker(database *sql.DB, getStationsFunc func() []str
 
 		for range ticker.C {
 			now := time.Now().In(time.Local)
-			// Daytime check between 06:00 and 22:00
 			if now.Hour() >= 6 && now.Hour() <= 22 {
 				log.Println("Periodic daytime notice check running...")
 				stList := getStationsFunc()
@@ -403,6 +537,15 @@ func mergeUnique(a, b []string) []string {
 
 func uniqueStrings(slice []string) []string {
 	return mergeUnique(slice, nil)
+}
+
+func containsString(slice []string, val string) bool {
+	for _, item := range slice {
+		if item == val {
+			return true
+		}
+	}
+	return false
 }
 
 func hashString(s string) string {

@@ -413,6 +413,29 @@ body, html {
     border-radius: 8px;
     padding: 14px;
     margin-bottom: 12px;
+    transition: all 0.3s ease;
+}
+
+.notice-card-highlight {
+    border-color: #00e5ff !important;
+    background: #1a2736 !important;
+    box-shadow: 0 0 22px rgba(0, 229, 255, 0.8) !important;
+    animation: noticeHighlightPulse 1.5s ease-in-out infinite alternate;
+}
+
+@keyframes noticeHighlightPulse {
+    from { box-shadow: 0 0 10px rgba(0, 229, 255, 0.4); }
+    to { box-shadow: 0 0 26px rgba(0, 229, 255, 1); }
+}
+
+.clickable-notice-badge {
+    cursor: pointer !important;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.clickable-notice-badge:hover {
+    transform: scale(1.08);
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.7);
 }
 
 .notice-card-header {

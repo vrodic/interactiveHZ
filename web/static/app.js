@@ -1041,6 +1041,13 @@ function renderNoticesModalBody() {
             badgesHTML += `<span class="notice-badge notice-badge-works">🚧 Track works</span> `;
         }
 
+        let datesHTML = '';
+        if (item.dates_json && item.dates_json.length > 0) {
+            datesHTML = `<div style="font-size: 11px; color: #00e5ff; margin-bottom: 6px;">📅 Dates: ${item.dates_json.map(d => escapeHTML(d)).join(', ')}</div>`;
+        } else if (item.date_from || item.date_to) {
+            datesHTML = `<div style="font-size: 11px; color: #00e5ff; margin-bottom: 6px;">📅 Date: ${escapeHTML(item.date_from)} ${item.date_to ? '➔ ' + escapeHTML(item.date_to) : ''}</div>`;
+        }
+
         let pdfHTML = '';
         if (item.pdf_urls && item.pdf_urls.length > 0) {
             pdfHTML += `<div style="margin-top: 8px; font-size: 11px;">📄 Linked documents: `;
@@ -1051,11 +1058,12 @@ function renderNoticesModalBody() {
         }
 
         cardsHTML += `
-            <div class="notice-card">
+            <div class="notice-card" id="notice-card-${escapeHTML(item.id)}" data-notice-id="${escapeHTML(item.id)}">
                 <div class="notice-card-header">
                     <div class="notice-card-title">${escapeHTML(item.title)}</div>
                     <div>${badgesHTML}</div>
                 </div>
+                ${datesHTML}
                 <div class="notice-card-content">${escapeHTML(item.content)}</div>
                 ${pdfHTML}
             </div>
@@ -1065,11 +1073,24 @@ function renderNoticesModalBody() {
     body.innerHTML = cardsHTML;
 }
 
-function openNoticesModal() {
+function openNoticesModal(highlightNoticeId = null) {
     const modal = document.getElementById('notices-modal');
     if (modal) {
         modal.style.display = 'flex';
         renderNoticesModalBody();
+
+        if (highlightNoticeId) {
+            setTimeout(() => {
+                const targetCard = document.getElementById(`notice-card-${highlightNoticeId}`);
+                if (targetCard) {
+                    targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    targetCard.classList.add('notice-card-highlight');
+                    setTimeout(() => {
+                        targetCard.classList.remove('notice-card-highlight');
+                    }, 4000);
+                }
+            }, 100);
+        }
     }
 }
 
@@ -1750,10 +1771,10 @@ async function openStationTimetable(station) {
 
                 let badgesHTML = '';
                 if (e.is_bus_replacement) {
-                    badgesHTML += `<span class="notice-badge notice-badge-bus" style="font-size: 9px; padding: 1px 4px;">🚌 Bus</span> `;
+                    badgesHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(e.notice_id || '')}" style="font-size: 9px; padding: 1px 4px;">🚌 Bus</span> `;
                 }
                 if (e.is_track_works) {
-                    badgesHTML += `<span class="notice-badge notice-badge-works" style="font-size: 9px; padding: 1px 4px;">🚧 Works</span>`;
+                    badgesHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(e.notice_id || '')}" style="font-size: 9px; padding: 1px 4px;">🚧 Works</span>`;
                 }
 
                 timetableHTML += `<tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="timetable-row" data-train="${escapeHTML(e.train_number)}">
@@ -1777,8 +1798,17 @@ async function openStationTimetable(station) {
                 map.off('popupopen', onPopupOpen);
                 const popupNode = popup.getElement();
                 if (popupNode) {
+                    popupNode.querySelectorAll('.clickable-notice-badge').forEach(badge => {
+                        badge.addEventListener('click', (evt) => {
+                            evt.stopPropagation();
+                            const noticeId = badge.getAttribute('data-notice-id');
+                            openNoticesModal(noticeId);
+                        });
+                    });
+
                     popupNode.querySelectorAll('.timetable-row').forEach(row => {
-                        row.addEventListener('click', () => {
+                        row.addEventListener('click', (evt) => {
+                            if (evt.target.classList.contains('clickable-notice-badge')) return;
                             const trNum = row.getAttribute('data-train');
                             openTrainDetails({ train_number: trNum });
                         });

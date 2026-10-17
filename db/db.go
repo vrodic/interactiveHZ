@@ -147,6 +147,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		is_track_works INTEGER DEFAULT 0,
 		date_from TEXT,
 		date_to TEXT,
+		dates_json TEXT,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	`
@@ -154,6 +155,9 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	if _, err := database.Exec(schema); err != nil {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
+
+	// Migration for existing databases
+	_, _ = database.Exec("ALTER TABLE traffic_notices ADD COLUMN dates_json TEXT;")
 
 	var segCount int
 	_ = database.QueryRow("SELECT COUNT(*) FROM route_segments").Scan(&segCount)

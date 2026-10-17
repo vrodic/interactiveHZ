@@ -24,6 +24,7 @@ type NoticeResponse struct {
 	IsTrackWorks     bool     `json:"is_track_works"`
 	DateFrom         string   `json:"date_from,omitempty"`
 	DateTo           string   `json:"date_to,omitempty"`
+	DatesJSON        []string `json:"dates_json,omitempty"`
 	UpdatedAt        string   `json:"updated_at"`
 }
 
@@ -38,6 +39,7 @@ type StationTimetableEntry struct {
 	DelayMinutes           *int   `json:"delay_minutes,omitempty"`
 	IsBusReplacement       bool   `json:"is_bus_replacement,omitempty"`
 	IsTrackWorks           bool   `json:"is_track_works,omitempty"`
+	NoticeID               string `json:"notice_id,omitempty"`
 }
 
 type RoutePlanEntry struct {
