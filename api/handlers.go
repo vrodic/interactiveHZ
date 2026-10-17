@@ -61,10 +61,19 @@ type cachedDelay struct {
 	timestamp time.Time
 }
 
+type pendingSpikeRecord struct {
+	delayMinutes   int
+	lastStation    string
+	nextStation    string
+	positionStatus string
+	timestamp      time.Time
+}
+
 type Server struct {
 	db                  *sql.DB
 	osmGraph            *OSMGraph
 	delayCache          sync.Map
+	pendingSpikes       sync.Map
 	routeCache          sync.Map
 	segmentsCache       []SegmentSpeed
 	segmentsJSON        []byte
@@ -886,7 +895,20 @@ func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
 		var l RecentDelayLog
 		var rawUpdatedAt string
 		if err := rows.Scan(&l.DelayDate, &l.DelayMinutes, &l.PositionStatus, &l.LastStation, &rawUpdatedAt); err == nil {
-			parsedTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", rawUpdatedAt, loc)
+			var parsedTime time.Time
+			var parseErr error
+			formats := []string{
+				"2006-01-02 15:04:05",
+				time.RFC3339,
+				"2006-01-02T15:04:05Z",
+				"2006-01-02T15:04:05",
+			}
+			for _, f := range formats {
+				parsedTime, parseErr = time.ParseInLocation(f, rawUpdatedAt, loc)
+				if parseErr == nil {
+					break
+				}
+			}
 			if parseErr == nil {
 				l.UpdatedAt = parsedTime.Format("15:04")
 			} else {
@@ -895,6 +917,18 @@ func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
 					timeParts := strings.Split(parts[1], ":")
 					if len(timeParts) >= 2 {
 						l.UpdatedAt = timeParts[0] + ":" + timeParts[1]
+					} else {
+						l.UpdatedAt = rawUpdatedAt
+					}
+				} else if strings.Contains(rawUpdatedAt, "T") {
+					tParts := strings.Split(rawUpdatedAt, "T")
+					if len(tParts) > 1 {
+						timeParts := strings.Split(tParts[1], ":")
+						if len(timeParts) >= 2 {
+							l.UpdatedAt = timeParts[0] + ":" + timeParts[1]
+						} else {
+							l.UpdatedAt = rawUpdatedAt
+						}
 					} else {
 						l.UpdatedAt = rawUpdatedAt
 					}
@@ -1315,12 +1349,65 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 
 			var lastHistDelay int
 			var lastHistStatus, lastHistLastSt, lastHistNextSt string
+			var lastHistTimeStr string
 			errHist := s.db.QueryRow(`
-				SELECT delay_minutes, COALESCE(position_status, ''), COALESCE(last_station, ''), COALESCE(next_station, '')
+				SELECT delay_minutes, COALESCE(position_status, ''), COALESCE(last_station, ''), COALESCE(next_station, ''), CAST(updated_at AS TEXT)
 				FROM historical_train_delays
 				WHERE train_number = ?
 				ORDER BY id DESC LIMIT 1
-			`, trainID).Scan(&lastHistDelay, &lastHistStatus, &lastHistLastSt, &lastHistNextSt)
+			`, trainID).Scan(&lastHistDelay, &lastHistStatus, &lastHistLastSt, &lastHistNextSt, &lastHistTimeStr)
+
+			if errHist == nil {
+				loc, _ := time.LoadLocation("Europe/Zagreb")
+				if loc == nil {
+					loc = time.FixedZone("CEST", 2*3600)
+				}
+				lastHistTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", lastHistTimeStr, loc)
+				if parseErr != nil {
+					lastHistTime, parseErr = time.ParseInLocation(time.RFC3339, lastHistTimeStr, loc)
+				}
+
+				if parseErr == nil {
+					elapsedMins := getZagrebTime().Sub(lastHistTime).Minutes()
+					if elapsedMins < 0 {
+						elapsedMins = -elapsedMins
+					}
+					diff := delayMins - lastHistDelay
+					if diff < 0 {
+						diff = -diff
+					}
+					if elapsedMins < 10.0 && diff > 45 {
+						var confirmed bool
+						if val, ok := s.pendingSpikes.Load(trainID); ok {
+							pending := val.(pendingSpikeRecord)
+							if time.Since(pending.timestamp) < 15*time.Minute {
+								pDiff := pending.delayMinutes - delayMins
+								if pDiff < 0 {
+									pDiff = -pDiff
+								}
+								if pDiff <= 15 {
+									confirmed = true
+								}
+							}
+						}
+
+						if !confirmed {
+							s.pendingSpikes.Store(trainID, pendingSpikeRecord{
+								delayMinutes:   delayMins,
+								lastStation:    delayResp.Data.LastStation,
+								nextStation:    nextSt,
+								positionStatus: delayResp.Data.PositionStatus,
+								timestamp:      time.Now(),
+							})
+							return &delayResp, nil
+						} else {
+							s.pendingSpikes.Delete(trainID)
+						}
+					} else {
+						s.pendingSpikes.Delete(trainID)
+					}
+				}
+			}
 
 			// Check if we already recorded an 'arrived' status today for this train
 			var existingArrivedCount int

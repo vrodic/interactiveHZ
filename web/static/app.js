@@ -891,16 +891,28 @@ function initNavHandlers() {
     const swapBtn = document.getElementById('swap-stations-btn');
     if (swapBtn) {
         swapBtn.addEventListener('click', () => {
-            const fromSel = document.getElementById('route-from-select');
-            const toSel = document.getElementById('route-to-select');
-            const temp = fromSel.value;
-            fromSel.value = toSel.value;
-            toSel.value = temp;
-            if (fromSel.value && toSel.value) {
+            const fromInput = document.getElementById('route-from-input');
+            const fromIdInput = document.getElementById('route-from-id');
+            const toInput = document.getElementById('route-to-input');
+            const toIdInput = document.getElementById('route-to-id');
+
+            const tempVal = fromInput.value;
+            const tempId = fromIdInput.value;
+
+            fromInput.value = toInput.value;
+            fromIdInput.value = toIdInput.value;
+
+            toInput.value = tempVal;
+            toIdInput.value = tempId;
+
+            if (fromIdInput.value && toIdInput.value) {
                 findRoutePlans();
             }
         });
     }
+
+    setupStationAutocomplete('route-from-input', 'route-from-id', 'route-from-results');
+    setupStationAutocomplete('route-to-input', 'route-to-id', 'route-to-results');
 
     renderRecentPairs();
 
@@ -1155,6 +1167,104 @@ function saveRecentPair(fromId, fromName, toId, toName) {
     }
 }
 
+function setupStationAutocomplete(inputId, idInputId, resultsId) {
+    const inputEl = document.getElementById(inputId);
+    const hiddenEl = document.getElementById(idInputId);
+    const resultsEl = document.getElementById(resultsId);
+
+    if (!inputEl || !hiddenEl || !resultsEl) return;
+
+    let activeIndex = -1;
+
+    inputEl.addEventListener('input', (e) => {
+        const query = e.target.value.trim();
+        hiddenEl.value = '';
+        activeIndex = -1;
+
+        if (query.length < 1) {
+            resultsEl.style.display = 'none';
+            return;
+        }
+
+        const normalizedQuery = removeDiacritics(query);
+        const matches = stationsData.filter(st => {
+            const normName = removeDiacritics(st.stop_name);
+            return normName.includes(normalizedQuery);
+        });
+
+        matches.sort((a, b) => {
+            const normA = removeDiacritics(a.stop_name);
+            const normB = removeDiacritics(b.stop_name);
+            const prefixA = normA.startsWith(normalizedQuery);
+            const prefixB = normB.startsWith(normalizedQuery);
+            if (prefixA && !prefixB) return -1;
+            if (!prefixA && prefixB) return 1;
+            return normA.localeCompare(normB);
+        });
+
+        resultsEl.innerHTML = '';
+        if (matches.length === 0) {
+            resultsEl.innerHTML = '<div class="search-item" style="color: #a0aec0; cursor: default;">No stations found</div>';
+            resultsEl.style.display = 'block';
+            return;
+        }
+
+        matches.slice(0, 10).forEach((st, idx) => {
+            const div = document.createElement('div');
+            div.className = 'search-item';
+            div.dataset.index = idx;
+            div.innerHTML = `<strong>🚉 ${escapeHTML(st.stop_name)}</strong>`;
+            div.onclick = () => {
+                inputEl.value = st.stop_name;
+                hiddenEl.value = st.stop_id;
+                resultsEl.style.display = 'none';
+            };
+            resultsEl.appendChild(div);
+        });
+
+        resultsEl.style.display = 'block';
+    });
+
+    inputEl.addEventListener('keydown', (e) => {
+        const itemEls = resultsEl.querySelectorAll('.search-item');
+        if (!itemEls.length || resultsEl.style.display === 'none') return;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            activeIndex = (activeIndex + 1) % itemEls.length;
+            highlightItem(itemEls);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            activeIndex = (activeIndex - 1 + itemEls.length) % itemEls.length;
+            highlightItem(itemEls);
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (activeIndex >= 0 && activeIndex < itemEls.length) {
+                itemEls[activeIndex].click();
+            }
+        } else if (e.key === 'Escape') {
+            resultsEl.style.display = 'none';
+        }
+    });
+
+    function highlightItem(itemEls) {
+        itemEls.forEach((el, idx) => {
+            if (idx === activeIndex) {
+                el.style.background = '#2a3240';
+                el.scrollIntoView({ block: 'nearest' });
+            } else {
+                el.style.background = '';
+            }
+        });
+    }
+
+    document.addEventListener('click', (e) => {
+        if (!inputEl.contains(e.target) && !resultsEl.contains(e.target)) {
+            resultsEl.style.display = 'none';
+        }
+    });
+}
+
 function renderRecentPairs() {
     const container = document.getElementById('recent-pairs-container');
     const chips = document.getElementById('recent-pairs-chips');
@@ -1173,8 +1283,10 @@ function renderRecentPairs() {
             btn.style.cssText = 'background: #2a313d; border: 1px solid #3a4250; color: #00e5ff; font-size: 11px; padding: 3px 8px; border-radius: 12px; cursor: pointer;';
             btn.textContent = `${p.fromName} ➔ ${p.toName}`;
             btn.onclick = () => {
-                document.getElementById('route-from-select').value = p.fromId;
-                document.getElementById('route-to-select').value = p.toId;
+                document.getElementById('route-from-input').value = p.fromName;
+                document.getElementById('route-from-id').value = p.fromId;
+                document.getElementById('route-to-input').value = p.toName;
+                document.getElementById('route-to-id').value = p.toId;
                 findRoutePlans();
             };
             chips.appendChild(btn);
@@ -1186,19 +1298,42 @@ function renderRecentPairs() {
 }
 
 async function findRoutePlans() {
-    const fromSelect = document.getElementById('route-from-select');
-    const toSelect = document.getElementById('route-to-select');
-    const fromId = fromSelect.value;
-    const toId = toSelect.value;
+    const fromInput = document.getElementById('route-from-input');
+    const fromIdInput = document.getElementById('route-from-id');
+    const toInput = document.getElementById('route-to-input');
+    const toIdInput = document.getElementById('route-to-id');
+
+    let fromId = fromIdInput.value;
+    let toId = toIdInput.value;
     const resultsContainer = document.getElementById('route-results-container');
 
+    if (!fromId && fromInput.value.trim()) {
+        const query = removeDiacritics(fromInput.value.trim());
+        const match = stationsData.find(st => removeDiacritics(st.stop_name) === query) || stationsData.find(st => removeDiacritics(st.stop_name).includes(query));
+        if (match) {
+            fromId = match.stop_id;
+            fromIdInput.value = match.stop_id;
+            fromInput.value = match.stop_name;
+        }
+    }
+
+    if (!toId && toInput.value.trim()) {
+        const query = removeDiacritics(toInput.value.trim());
+        const match = stationsData.find(st => removeDiacritics(st.stop_name) === query) || stationsData.find(st => removeDiacritics(st.stop_name).includes(query));
+        if (match) {
+            toId = match.stop_id;
+            toIdInput.value = match.stop_id;
+            toInput.value = match.stop_name;
+        }
+    }
+
     if (!fromId || !toId) {
-        resultsContainer.innerHTML = '<p style="text-align: center; color: #ef4444; padding: 10px;">Please select both origin and destination stations.</p>';
+        resultsContainer.innerHTML = '<p style="text-align: center; color: #ef4444; padding: 10px;">Please select valid origin and destination stations.</p>';
         return;
     }
 
-    const fromName = fromSelect.options[fromSelect.selectedIndex]?.text || '';
-    const toName = toSelect.options[toSelect.selectedIndex]?.text || '';
+    const fromName = fromInput.value.trim();
+    const toName = toInput.value.trim();
     saveRecentPair(fromId, fromName, toId, toName);
 
     resultsContainer.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 10px;">Searching routes...</p>';
@@ -1234,22 +1369,23 @@ async function findRoutePlans() {
                 <tr style="${rowStyle}" class="${rowClass}">
                     <td style="padding: 10px;">🕒 ${depTimeHM} ➔ ${arrTimeHM} <span style="color: #a0aec0; font-size: 11px;">(${r.duration_minutes} min)</span></td>
                     <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">Train ${escapeHTML(r.train_number)}</a>${badgeStr}${transferBadge}</td>
-                    <td style="padding: 10px;">🚩 ${escapeHTML(r.origin_station_name)}</td>
-                    <td style="padding: 10px;">🏁 ${escapeHTML(r.destination_station_name)}</td>
                     <td style="padding: 10px;">${delayStr}</td>
                 </tr>
             `;
         });
 
+        const headerRouteTitle = `🚩 ${escapeHTML(fromName)} ➔ 🏁 ${escapeHTML(toName)}`;
+
         resultsContainer.innerHTML = `
+            <div style="background: #1e242e; border: 1px solid #3a4250; border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; font-weight: bold; font-size: 14px; color: #00e5ff;">
+                ${headerRouteTitle}
+            </div>
             <div style="max-height: 280px; overflow-y: auto;">
                 <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
                     <thead>
                         <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
                             <th style="padding: 8px;">Departure ➔ Arrival</th>
                             <th style="padding: 8px;">Train</th>
-                            <th style="padding: 8px;">Origin</th>
-                            <th style="padding: 8px;">Destination</th>
                             <th style="padding: 8px;">Status</th>
                         </tr>
                     </thead>
@@ -1300,14 +1436,6 @@ async function loadSegments() {
 }
 
 function renderStations() {
-    const fromSelect = document.getElementById('route-from-select');
-    const toSelect = document.getElementById('route-to-select');
-
-    if (fromSelect && toSelect) {
-        fromSelect.innerHTML = '<option value="">Select origin station...</option>';
-        toSelect.innerHTML = '<option value="">Select destination station...</option>';
-    }
-
     stationsData.forEach(st => {
         const icon = L.divIcon({
             className: 'station-marker',
@@ -1323,18 +1451,6 @@ function renderStations() {
         });
 
         stationMarkersMap[st.stop_id] = marker;
-
-        if (fromSelect && toSelect) {
-            const opt1 = document.createElement('option');
-            opt1.value = st.stop_id;
-            opt1.textContent = st.stop_name;
-            fromSelect.appendChild(opt1);
-
-            const opt2 = document.createElement('option');
-            opt2.value = st.stop_id;
-            opt2.textContent = st.stop_name;
-            toSelect.appendChild(opt2);
-        }
     });
 }
 
@@ -1635,10 +1751,6 @@ async function fetchAndDisplayTrainDetails(trainNum) {
                 <div class="detail-value">🏁 ${escapeHTML(data.last_station_name)}</div>
             </div>
             <div class="detail-row">
-                <div class="detail-label">Route / Headsign</div>
-                <div class="detail-value">${escapeHTML(data.headsign || 'HŽ Passenger Transport')}</div>
-            </div>
-            <div class="detail-row">
                 <div class="detail-label">Scheduled Journey Time</div>
                 <div class="detail-value">🕒 ${stripSeconds(data.first_departure_time)} ➔ ${stripSeconds(data.last_arrival_time)}</div>
             </div>
@@ -1776,7 +1888,10 @@ function renderRecentDelaysHTML(logs) {
         const delayMins = primary.delay_minutes || 0;
         const color = delayMins > 0 ? '#ef4444' : '#10b981';
         const delayText = delayMins > 0 ? `+${delayMins} min late` : 'On Time';
-        const timePart = primary.updated_at ? ` ${escapeHTML(primary.updated_at)}` : '';
+        let primaryTime = primary.updated_at ? String(primary.updated_at).trim() : '';
+        if (primaryTime.includes('T')) primaryTime = primaryTime.split('T')[1];
+        if (primaryTime.includes(' ')) primaryTime = primaryTime.split(' ')[1];
+        const timePart = primaryTime ? ` ${escapeHTML(stripSeconds(primaryTime))}` : '';
 
         const arrowSymbol = isExpanded ? '▴' : '▾';
 
@@ -1801,7 +1916,10 @@ function renderRecentDelaysHTML(logs) {
                 const subDelayMins = sub.delay_minutes || 0;
                 const subColor = subDelayMins > 0 ? '#ef4444' : '#10b981';
                 const subDelayText = subDelayMins > 0 ? `+${subDelayMins} min late` : 'On Time';
-                const subTimePart = sub.updated_at ? escapeHTML(sub.updated_at) : '';
+                let subTime = sub.updated_at ? String(sub.updated_at).trim() : '';
+                if (subTime.includes('T')) subTime = subTime.split('T')[1];
+                if (subTime.includes(' ')) subTime = subTime.split(' ')[1];
+                const subTimePart = subTime ? escapeHTML(stripSeconds(subTime)) : '';
 
                 rowsHTML += `
                     <tr class="delay-subrow-${escapeHTML(safeKey)}" style="display: ${subDisplayStyle}; background: #161b22; border-bottom: 1px dashed #2a313d;">
@@ -1931,10 +2049,6 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         <div class="detail-row">
             <div class="detail-label">Last Station (Destination)</div>
             <div class="detail-value">🏁 ${destStation}</div>
-        </div>
-        <div class="detail-row">
-            <div class="detail-label">Route / Headsign</div>
-            <div class="detail-value">${escapeHTML(train.headsign || 'HŽ Passenger Transport')}</div>
         </div>
         <div class="detail-row">
             <div class="detail-label">Current Segment</div>

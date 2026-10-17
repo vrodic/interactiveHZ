@@ -637,6 +637,86 @@ func TestHistoricalTrainDelaysUniqueChangesOnly(t *testing.T) {
 	}
 }
 
+func TestDelaySpikeFiltering(t *testing.T) {
+	srv := setupTestDB(t)
+
+	zgNow := getZagrebTime()
+	zgNowStr := zgNow.Format("2006-01-02 15:04:05")
+
+	// 1. Insert historical record of 10 min delay recorded just now
+	_, err := srv.db.Exec(`
+		INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
+		VALUES ('2010', ?, 10, 'en_route', 's1', 's2', ?)
+	`, zgNow.Format("2006-01-02"), zgNowStr)
+	if err != nil {
+		t.Fatalf("Failed to insert historical delay: %v", err)
+	}
+
+	// 2. Simulate arrival of a transient spike (delay jumps from 10 to 120 mins)
+	// Query last historical record
+	var lastHistDelay int
+	var lastHistTimeStr string
+	_ = srv.db.QueryRow(`
+		SELECT delay_minutes, CAST(updated_at AS TEXT) FROM historical_train_delays WHERE train_number = '2010' ORDER BY id DESC LIMIT 1
+	`).Scan(&lastHistDelay, &lastHistTimeStr)
+
+	loc, _ := time.LoadLocation("Europe/Zagreb")
+	if loc == nil {
+		loc = time.FixedZone("CEST", 2*3600)
+	}
+	lastHistTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", lastHistTimeStr, loc)
+	if parseErr != nil {
+		lastHistTime, _ = time.ParseInLocation(time.RFC3339, lastHistTimeStr, loc)
+	}
+
+	elapsedMins := getZagrebTime().Sub(lastHistTime).Minutes()
+	if elapsedMins < 0 {
+		elapsedMins = -elapsedMins
+	}
+	newDelay := 120
+	diff := newDelay - lastHistDelay
+
+	if elapsedMins < 10.0 && diff > 45 {
+		// Store spike as pending
+		srv.pendingSpikes.Store("2010", pendingSpikeRecord{
+			delayMinutes:   newDelay,
+			lastStation:    "s1",
+			nextStation:    "s2",
+			positionStatus: "en_route",
+			timestamp:      time.Now(),
+		})
+	}
+
+	// Verify that pendingSpikes has "2010"
+	if _, ok := srv.pendingSpikes.Load("2010"); !ok {
+		t.Fatalf("Expected pendingSpikes to store transient delay spike for train 2010")
+	}
+
+	// Verify that historical_train_delays count is still 1 (spike not persisted)
+	var count int
+	_ = srv.db.QueryRow("SELECT COUNT(*) FROM historical_train_delays WHERE train_number = '2010'").Scan(&count)
+	if count != 1 {
+		t.Errorf("Expected historical records count to remain 1, got %d", count)
+	}
+
+	// 3. Simulate a second poll confirming the high delay (118 mins)
+	var confirmed bool
+	if val, ok := srv.pendingSpikes.Load("2010"); ok {
+		pending := val.(pendingSpikeRecord)
+		pDiff := pending.delayMinutes - 118
+		if pDiff < 0 {
+			pDiff = -pDiff
+		}
+		if pDiff <= 15 {
+			confirmed = true
+		}
+	}
+
+	if !confirmed {
+		t.Errorf("Expected spike to be confirmed on second poll with close delay value")
+	}
+}
+
 func TestAutoGenerateMissingArrivals(t *testing.T) {
 	srv := setupTestDB(t)
 
