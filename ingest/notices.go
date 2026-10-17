@@ -222,8 +222,8 @@ func parseNoticesFromHTML(category string, html string, allStations []string, va
 		fullSectionText := sec + "\n" + cleanText
 
 		pdfURLs := extractPDFURLs(fullSectionText)
-		rawTrains := extractTrainNumbers(fullSectionText)
-		stations := extractStations(fullSectionText, allStations)
+		rawTrains := extractTrainNumbers(cleanText)
+		stations := extractStations(cleanText, allStations)
 
 		// Check embedded JSON
 		embeddedStations, dateFrom, dateTo := extractEmbeddedJSONData(sec)
