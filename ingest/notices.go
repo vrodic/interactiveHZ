@@ -163,12 +163,20 @@ func scrapePage(category string, pageURL string, database *sql.DB, allStations [
 	return true, items, nil
 }
 
+var accordionContainerRegex = regexp.MustCompile(`(?i)id="accordion[^"]*"`)
+
 func parseNoticesFromHTML(category string, html string, allStations []string, validTrainNums map[string]bool, client *http.Client) []NoticeItem {
 	var items []NoticeItem
 
-	sections := buttonTagRegex.Split(html, -1)
+	// Isolate main accordion container to skip navigation/footer noise
+	htmlContent := html
+	if loc := accordionContainerRegex.FindStringIndex(html); loc != nil {
+		htmlContent = html[loc[0]:]
+	}
+
+	sections := buttonTagRegex.Split(htmlContent, -1)
 	if len(sections) <= 1 {
-		sections = []string{html}
+		sections = []string{htmlContent}
 	}
 
 	for idx, sec := range sections {

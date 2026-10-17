@@ -92,3 +92,33 @@ func TestLineNamePrefixStripping(t *testing.T) {
 		t.Errorf("Expected Zagreb Borongaj to be extracted as affected station, got %v", item.ParsedStations)
 	}
 }
+
+func TestAccordionContainerIsolation(t *testing.T) {
+	htmlSample := `
+	<html>
+	<body>
+		<nav>
+			<button>Stanje u prometu - Zagreb GK, Dugo Selo</button>
+		</nav>
+		<div id="accordionRailwayWorks">
+			<button class="accordion">Vrbovec - Križevci</button>
+			<div>Zbog radova na pruzi Dugo Selo - Botovo između Vrbovca i Križevaca.</div>
+		</div>
+	</body>
+	</html>
+	`
+
+	allStations := []string{"Zagreb GK", "Dugo Selo", "Vrbovec", "Križevci"}
+	validTrains := map[string]bool{}
+	items := parseNoticesFromHTML("works", htmlSample, allStations, validTrains, nil)
+
+	if len(items) == 0 {
+		t.Fatalf("Expected 1 item, got 0")
+	}
+
+	for _, st := range items[0].ParsedStations {
+		if st == "Dugo Selo" || st == "Zagreb GK" {
+			t.Errorf("Station %s from nav button should NOT be extracted", st)
+		}
+	}
+}
