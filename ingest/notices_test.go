@@ -58,3 +58,37 @@ func TestParseNoticesSampleHTML(t *testing.T) {
 		t.Errorf("Expected extracted dates in DatesJSON, got empty")
 	}
 }
+
+func TestLineNamePrefixStripping(t *testing.T) {
+	sampleHTML := `
+	<button class="accordion">Zagreb Borongaj - Zagreb GK (17. i 18.10.)</button>
+	<div>
+		Zbog radova na pruzi Zagreb GK – Dugo Selo između kolodvora Zagreb Borongaj i Zagreb GK 17. i 18. listopada 2026. od 7.50 do 16.30 sati promet će teći desnim kolosijekom.
+	</div>
+	`
+
+	allStations := []string{"Zagreb GK", "Zagreb Borongaj", "Dugo Selo", "Vrbovec", "Križevci"}
+	validTrains := map[string]bool{}
+	items := parseNoticesFromHTML("works", sampleHTML, allStations, validTrains, nil)
+
+	if len(items) == 0 {
+		t.Fatalf("Expected parsed notice items, got 0")
+	}
+
+	item := items[0]
+	for _, st := range item.ParsedStations {
+		if st == "Dugo Selo" {
+			t.Errorf("Dugo Selo should NOT be extracted as an affected station when named only in line description 'na pruzi Zagreb GK – Dugo Selo'")
+		}
+	}
+
+	foundBorongaj := false
+	for _, st := range item.ParsedStations {
+		if st == "Zagreb Borongaj" {
+			foundBorongaj = true
+		}
+	}
+	if !foundBorongaj {
+		t.Errorf("Expected Zagreb Borongaj to be extracted as affected station, got %v", item.ParsedStations)
+	}
+}

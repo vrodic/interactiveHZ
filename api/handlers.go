@@ -568,8 +568,9 @@ func isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string
 		return false, false, false, ""
 	}
 
-	trMatched := false
+	// 1. If notice explicitly lists train numbers, match ONLY if this train's number is listed
 	if len(n.ParsedTrains) > 0 {
+		trMatched := false
 		for _, tr := range n.ParsedTrains {
 			if tr == trainNum {
 				trMatched = true
@@ -579,7 +580,11 @@ func isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string
 		if !trMatched {
 			return false, false, false, ""
 		}
-	} else if len(n.ParsedStations) > 0 {
+		return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
+	}
+
+	// 2. Otherwise match based on affected station overlap
+	if len(n.ParsedStations) > 0 {
 		stMatched := false
 		for _, st := range n.ParsedStations {
 			for _, stName := range stationNames {
@@ -595,11 +600,10 @@ func isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string
 		if !stMatched {
 			return false, false, false, ""
 		}
-	} else {
-		return false, false, false, ""
+		return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
 	}
 
-	return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
+	return false, false, false, ""
 }
 
 func (s *Server) GetStations(w http.ResponseWriter, r *http.Request) {

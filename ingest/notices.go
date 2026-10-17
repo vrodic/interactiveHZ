@@ -421,9 +421,29 @@ func extractTrainNumbers(text string) []string {
 	return uniqueStrings(filtered)
 }
 
+var linePrefixRegex = regexp.MustCompile(`(?i)(?:na\s+pruzi|pruga|pruzi|pruge)\s+[A-ČĆŽŠĐa-čćžšđ0-9\s–.-]+(?:između|bit\s+će|zbog|radi|zatvorena|otvorena|vozit|u\s+razdoblju)`)
+
+func stripLineNamePrefixes(text string) string {
+	// Remove expressions like "na pruzi Zagreb GK – Dugo Selo između" while retaining the trailing keyword "između"
+	return linePrefixRegex.ReplaceAllStringFunc(text, func(m string) string {
+		lower := strings.ToLower(m)
+		keywords := []string{"između", "bit će", "zbog", "radi", "zatvorena", "otvorena", "vozit", "u razdoblju"}
+		for _, kw := range keywords {
+			if idx := strings.Index(lower, kw); idx != -1 {
+				return " " + m[idx:]
+			}
+		}
+		return " "
+	})
+}
+
 func extractStations(text string, allStations []string) []string {
+	// Strip railway line name designations (e.g., "na pruzi Zagreb GK – Dugo Selo", "pruga M604 Dugo Selo - Botovo")
+	// so line endpoints are not falsely parsed as affected stations unless explicitly named in affected sections.
+	cleanedText := stripLineNamePrefixes(text)
+
 	var found []string
-	lowerText := strings.ToLower(text)
+	lowerText := strings.ToLower(cleanedText)
 
 	for _, st := range allStations {
 		stClean := strings.TrimSpace(st)
