@@ -134,11 +134,30 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		avg_duration_mins REAL NOT NULL,
 		PRIMARY KEY (from_stop_id, to_stop_id)
 	);
+
+	CREATE TABLE IF NOT EXISTS traffic_notices (
+		id TEXT PRIMARY KEY,
+		category TEXT NOT NULL,
+		title TEXT NOT NULL,
+		content TEXT NOT NULL,
+		parsed_stations TEXT,
+		parsed_trains TEXT,
+		pdf_urls TEXT,
+		is_bus_replacement INTEGER DEFAULT 0,
+		is_track_works INTEGER DEFAULT 0,
+		date_from TEXT,
+		date_to TEXT,
+		dates_json TEXT,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
 	`
 
 	if _, err := database.Exec(schema); err != nil {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
+
+	// Migration for existing databases
+	_, _ = database.Exec("ALTER TABLE traffic_notices ADD COLUMN dates_json TEXT;")
 
 	var segCount int
 	_ = database.QueryRow("SELECT COUNT(*) FROM route_segments").Scan(&segCount)
