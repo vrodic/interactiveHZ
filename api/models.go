@@ -12,6 +12,21 @@ type Station struct {
 	Lon      float64 `json:"lon"`
 }
 
+type NoticeResponse struct {
+	ID               string   `json:"id"`
+	Category         string   `json:"category"`
+	Title            string   `json:"title"`
+	Content          string   `json:"content"`
+	ParsedStations   []string `json:"parsed_stations"`
+	ParsedTrains     []string `json:"parsed_trains"`
+	PDFURLs          []string `json:"pdf_urls"`
+	IsBusReplacement bool     `json:"is_bus_replacement"`
+	IsTrackWorks     bool     `json:"is_track_works"`
+	DateFrom         string   `json:"date_from,omitempty"`
+	DateTo           string   `json:"date_to,omitempty"`
+	UpdatedAt        string   `json:"updated_at"`
+}
+
 type StationTimetableEntry struct {
 	TripID                 string `json:"trip_id"`
 	TrainNumber            string `json:"train_number"`
@@ -21,6 +36,8 @@ type StationTimetableEntry struct {
 	DepartureTime          string `json:"departure_time"`
 	StopSequence           int    `json:"stop_sequence"`
 	DelayMinutes           *int   `json:"delay_minutes,omitempty"`
+	IsBusReplacement       bool   `json:"is_bus_replacement,omitempty"`
+	IsTrackWorks           bool   `json:"is_track_works,omitempty"`
 }
 
 type RoutePlanEntry struct {
@@ -37,6 +54,8 @@ type RoutePlanEntry struct {
 	IsNearestFuture        bool   `json:"is_nearest_future,omitempty"`
 	IsTransfer             bool   `json:"is_transfer,omitempty"`
 	TransferStationName    string `json:"transfer_station_name,omitempty"`
+	AffectedByDisruption   bool   `json:"affected_by_disruption,omitempty"`
+	DisruptionNotice       string `json:"disruption_notice,omitempty"`
 }
 
 type DelayServiceStats struct {
@@ -89,6 +108,8 @@ type ActiveTrain struct {
 	PositionStatus   string   `json:"position_status,omitempty"`
 	ScheduledDepSec  int      `json:"scheduled_dep_sec"`
 	ScheduledArrSec  int      `json:"scheduled_arr_sec"`
+	IsBusReplacement bool     `json:"is_bus_replacement,omitempty"`
+	IsTrackWorks     bool     `json:"is_track_works,omitempty"`
 	Path             []LatLon `json:"path,omitempty"`
 }
 
@@ -122,6 +143,9 @@ type TrainDetails struct {
 	DelayMinutes          int                `json:"delay_minutes"`
 	PositionStatus        string             `json:"position_status,omitempty"`
 	IsActive              bool               `json:"is_active"`
+	IsBusReplacement      bool               `json:"is_bus_replacement,omitempty"`
+	IsTrackWorks          bool               `json:"is_track_works,omitempty"`
+	Notices               []NoticeResponse   `json:"notices,omitempty"`
 	Lat                   float64            `json:"lat,omitempty"`
 	Lon                   float64            `json:"lon,omitempty"`
 	DelayDistribution     *DelayDistribution `json:"delay_distribution,omitempty"`

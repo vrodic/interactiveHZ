@@ -104,6 +104,21 @@ func main() {
 	}()
 
 	server.StartBackgroundDelayWorker()
+	ingest.StartNoticesBackgroundWorker(database, func() []string {
+		rows, err := database.Query("SELECT stop_name FROM stations")
+		if err != nil {
+			return nil
+		}
+		defer rows.Close()
+		var names []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err == nil {
+				names = append(names, name)
+			}
+		}
+		return names
+	})
 
 	mux := http.NewServeMux()
 
@@ -113,6 +128,7 @@ func main() {
 	})
 
 	mux.HandleFunc("/api/search", server.Search)
+	mux.HandleFunc("/api/notices", server.GetNotices)
 	mux.HandleFunc("/api/stations", server.GetStations)
 	mux.HandleFunc("/api/stations/", server.GetStationTimetable)
 	mux.HandleFunc("/api/trains/", server.GetTrainDetails)

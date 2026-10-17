@@ -14,6 +14,9 @@ let selectedTrainNum = null;
 let selectedTrainRouteLayer = null;
 let selectedStationHighlightLayer = null;
 let selectedStationId = null;
+let noticesData = [];
+let stationNoticesMap = {};
+let segmentNoticesMap = {};
 
 let selectedTrainPollTimer = null;
 let selectedTrainLastStation = null;
@@ -207,6 +210,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initMap();
     initControls();
     initNavHandlers();
+    loadNotices();
     loadStations();
     loadSegments();
     startUpdateLoop();
@@ -810,6 +814,17 @@ function initNavHandlers() {
         }
     }
 
+    const noticesModal = document.getElementById('notices-modal');
+
+    document.getElementById('nav-notices').addEventListener('click', () => {
+        closeMobileMenu();
+        openNoticesModal();
+    });
+
+    document.getElementById('close-notices-modal').addEventListener('click', () => {
+        noticesModal.style.display = 'none';
+    });
+
     document.getElementById('nav-active-trains').addEventListener('click', () => {
         closeMobileMenu();
         openActiveTrainsModal();
@@ -916,7 +931,7 @@ function initNavHandlers() {
 
     renderRecentPairs();
 
-    [activeTrainsModal, dashboardModal, delaysStreamModal].forEach(modal => {
+    [noticesModal, activeTrainsModal, dashboardModal, delaysStreamModal].forEach(modal => {
         modal.addEventListener('click', (e) => {
             if (e.target === modal) {
                 modal.style.display = 'none';
@@ -1004,6 +1019,57 @@ function appendStreamLog(data) {
 
     while (logContainer.children.length > 100) {
         logContainer.removeChild(logContainer.lastChild);
+    }
+}
+
+function renderNoticesModalBody() {
+    const body = document.getElementById('notices-modal-body');
+    if (!body) return;
+
+    if (!noticesData || noticesData.length === 0) {
+        body.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 20px;">No active traffic notices or track works reported.</p>';
+        return;
+    }
+
+    let cardsHTML = '';
+    noticesData.forEach(item => {
+        let badgesHTML = '';
+        if (item.is_bus_replacement) {
+            badgesHTML += `<span class="notice-badge notice-badge-bus">🚌 Bus replacement</span> `;
+        }
+        if (item.is_track_works) {
+            badgesHTML += `<span class="notice-badge notice-badge-works">🚧 Track works</span> `;
+        }
+
+        let pdfHTML = '';
+        if (item.pdf_urls && item.pdf_urls.length > 0) {
+            pdfHTML += `<div style="margin-top: 8px; font-size: 11px;">📄 Linked documents: `;
+            item.pdf_urls.forEach((url, i) => {
+                pdfHTML += `<a href="${escapeHTML(url)}" target="_blank" rel="noopener" style="color: #00e5ff; margin-right: 8px; text-decoration: underline;">Schedule PDF ${i + 1}</a>`;
+            });
+            pdfHTML += `</div>`;
+        }
+
+        cardsHTML += `
+            <div class="notice-card">
+                <div class="notice-card-header">
+                    <div class="notice-card-title">${escapeHTML(item.title)}</div>
+                    <div>${badgesHTML}</div>
+                </div>
+                <div class="notice-card-content">${escapeHTML(item.content)}</div>
+                ${pdfHTML}
+            </div>
+        `;
+    });
+
+    body.innerHTML = cardsHTML;
+}
+
+function openNoticesModal() {
+    const modal = document.getElementById('notices-modal');
+    if (modal) {
+        modal.style.display = 'flex';
+        renderNoticesModalBody();
     }
 }
 
@@ -1362,13 +1428,18 @@ async function findRoutePlans() {
             const badgeStr = isNext ? '<span style="background: #00e5ff; color: #0f1217; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-left: 6px;">NEXT DEPARTURE</span>' : '';
             const transferBadge = r.is_transfer ? `<span style="background: #f59e0b; color: #0f1217; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-left: 4px;">1 TRANSFER (${escapeHTML(r.transfer_station_name)})</span>` : '';
 
+            let disruptionNoticeHTML = '';
+            if (r.affected_by_disruption) {
+                disruptionNoticeHTML = `<div style="font-size: 11px; color: #f59e0b; margin-top: 4px;">⚠️ <strong>Disruption Notice:</strong> ${escapeHTML(r.disruption_notice || 'Track works or bus replacement on route')}</div>`;
+            }
+
             const depTimeHM = stripSeconds(r.departure_time);
             const arrTimeHM = stripSeconds(r.arrival_time);
 
             rowsHTML += `
                 <tr style="${rowStyle}" class="${rowClass}">
                     <td style="padding: 10px;">🕒 ${depTimeHM} ➔ ${arrTimeHM} <span style="color: #a0aec0; font-size: 11px;">(${r.duration_minutes} min)</span></td>
-                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">Train ${escapeHTML(r.train_number)}</a>${badgeStr}${transferBadge}</td>
+                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">Train ${escapeHTML(r.train_number)}</a>${badgeStr}${transferBadge}${disruptionNoticeHTML}</td>
                     <td style="padding: 10px;">${delayStr}</td>
                 </tr>
             `;
@@ -1414,6 +1485,57 @@ async function findRoutePlans() {
     }
 }
 
+async function loadNotices() {
+    try {
+        const resp = await fetch('/api/notices');
+        noticesData = await resp.json();
+        processNoticesMapData();
+        renderNoticesModalBody();
+    } catch (e) {
+        console.error('Failed to load notices:', e);
+    }
+}
+
+function processNoticesMapData() {
+    stationNoticesMap = {};
+    segmentNoticesMap = {};
+
+    noticesData.forEach(notice => {
+        if (notice.parsed_stations) {
+            notice.parsed_stations.forEach(stName => {
+                const cleanSt = removeDiacritics(stName);
+                if (!stationNoticesMap[cleanSt]) stationNoticesMap[cleanSt] = [];
+                stationNoticesMap[cleanSt].push(notice);
+            });
+        }
+    });
+
+    if (segmentsData && segmentsData.length > 0) {
+        segmentsData.forEach(seg => {
+            const fromNorm = removeDiacritics(seg.from_stop_name);
+            const toNorm = removeDiacritics(seg.to_stop_name);
+
+            noticesData.forEach(notice => {
+                let match = false;
+                if (notice.parsed_stations) {
+                    const stNorms = notice.parsed_stations.map(removeDiacritics);
+                    if (stNorms.includes(fromNorm) && stNorms.includes(toNorm)) {
+                        match = true;
+                    }
+                }
+                if (match) {
+                    const segKey = seg.id || `${seg.from_stop_id}->${seg.to_stop_id}`;
+                    if (!segmentNoticesMap[segKey]) segmentNoticesMap[segKey] = [];
+                    segmentNoticesMap[segKey].push(notice);
+                }
+            });
+        });
+    }
+
+    if (stationsData.length > 0) renderStations();
+    if (segmentsData.length > 0) renderSegments();
+}
+
 async function loadStations() {
     try {
         const resp = await fetch('/api/stations');
@@ -1436,15 +1558,37 @@ async function loadSegments() {
 }
 
 function renderStations() {
+    Object.keys(stationMarkersMap).forEach(id => {
+        map.removeLayer(stationMarkersMap[id]);
+    });
+    stationMarkersMap = {};
+
     stationsData.forEach(st => {
+        const normName = removeDiacritics(st.stop_name);
+        const hasNotices = stationNoticesMap[normName] && stationNoticesMap[normName].length > 0;
+
+        let iconHTML = '';
+        let markerClassName = 'station-marker';
+        let iconSize = [16, 16];
+        let iconAnchor = [8, 8];
+
+        if (hasNotices) {
+            markerClassName = 'station-marker station-warning-marker';
+            iconHTML = `<div style="font-size: 14px; line-height: 1; text-align: center;">⚠️</div>`;
+            iconSize = [22, 22];
+            iconAnchor = [11, 11];
+        }
+
         const icon = L.divIcon({
-            className: 'station-marker',
-            iconSize: [16, 16],
-            iconAnchor: [8, 8]
+            className: markerClassName,
+            html: iconHTML,
+            iconSize: iconSize,
+            iconAnchor: iconAnchor
         });
 
         const marker = L.marker([st.lat, st.lon], { icon: icon }).addTo(map);
-        marker.bindTooltip(escapeHTML(st.stop_name));
+        const tooltipText = hasNotices ? `⚠️ ${escapeHTML(st.stop_name)} (Track Works / Notice)` : escapeHTML(st.stop_name);
+        marker.bindTooltip(tooltipText);
 
         marker.on('click', () => {
             openStationTimetable(st);
@@ -1471,10 +1615,16 @@ function renderSegments() {
             segmentPathsMap[`${seg.from_stop_id}->${seg.to_stop_id}`] = fallbackPath;
         }
 
+        const hasSegmentDisruption = segmentNoticesMap[key] && segmentNoticesMap[key].length > 0;
+        const lineColor = hasSegmentDisruption ? '#f59e0b' : '#3b82f6';
+        const lineWeight = hasSegmentDisruption ? 5 : 3;
+        const lineOpacity = hasSegmentDisruption ? 0.95 : 0.6;
+
         const line = L.polyline(lineCoords, {
-            color: '#3b82f6',
-            weight: 3,
-            opacity: 0.6
+            color: lineColor,
+            weight: lineWeight,
+            opacity: lineOpacity,
+            dashArray: hasSegmentDisruption ? '8, 6' : null
         });
         segmentsLayerGroup.addLayer(line);
 
@@ -1597,9 +1747,18 @@ async function openStationTimetable(station) {
                 const delayStr = delayVal > 0 ? `<span style="color: #ef4444;">+${delayVal}m</span>` : `<span style="color: #10b981;">On Time</span>`;
                 const dest = e.destination_station_name || e.headsign || 'N/A';
                 const depHM = stripSeconds(e.departure_time);
+
+                let badgesHTML = '';
+                if (e.is_bus_replacement) {
+                    badgesHTML += `<span class="notice-badge notice-badge-bus" style="font-size: 9px; padding: 1px 4px;">🚌 Bus</span> `;
+                }
+                if (e.is_track_works) {
+                    badgesHTML += `<span class="notice-badge notice-badge-works" style="font-size: 9px; padding: 1px 4px;">🚧 Works</span>`;
+                }
+
                 timetableHTML += `<tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="timetable-row" data-train="${escapeHTML(e.train_number)}">
                     <td style="padding: 6px 4px;">🕒 ${depHM}</td>
-                    <td style="padding: 6px 4px;"><strong>Train ${escapeHTML(e.train_number)}</strong></td>
+                    <td style="padding: 6px 4px;"><strong>Train ${escapeHTML(e.train_number)}</strong> ${badgesHTML}</td>
                     <td style="padding: 6px 4px; color: #e2e8f0; font-weight: 500;">🏁 ${escapeHTML(dest)}</td>
                     <td style="padding: 6px 4px;">${delayStr}</td>
                 </tr>`;
@@ -1714,6 +1873,14 @@ async function fetchAndDisplayTrainDetails(trainNum) {
         let statusStr = "Scheduled Train";
         let statusBadgeClass = "badge-on-time";
 
+        let disruptionBadgeHTML = '';
+        if (data.is_bus_replacement) {
+            disruptionBadgeHTML += `<span class="notice-badge notice-badge-bus" style="margin-left: 6px;">🚌 Bus replacement</span>`;
+        }
+        if (data.is_track_works) {
+            disruptionBadgeHTML += `<span class="notice-badge notice-badge-works" style="margin-left: 6px;">🚧 Track works</span>`;
+        }
+
         if (data.is_active) {
             statusStr = "Currently Active on Route";
             statusBadgeClass = "badge-on-time";
@@ -1739,7 +1906,7 @@ async function fetchAndDisplayTrainDetails(trainNum) {
             : `<span class="badge ${statusBadgeClass}">${escapeHTML(statusStr)}</span>`;
 
         if (titleEl) titleEl.textContent = `🚆 Train ${data.train_number}`;
-        if (badgeEl) badgeEl.innerHTML = delayBadge;
+        if (badgeEl) badgeEl.innerHTML = delayBadge + disruptionBadgeHTML;
 
         content.innerHTML = `
             <div class="detail-row">
@@ -2021,12 +2188,20 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         trainRecentDelays[trNum] = train.recent_delays;
     }
 
+        let activeDisruptionsHTML = '';
+        if (train.is_bus_replacement) {
+            activeDisruptionsHTML += `<span class="notice-badge notice-badge-bus" style="margin-left: 6px;">🚌 Bus replacement</span>`;
+        }
+        if (train.is_track_works) {
+            activeDisruptionsHTML += `<span class="notice-badge notice-badge-works" style="margin-left: 6px;">🚧 Track works</span>`;
+        }
+
     const delayBadge = train.delay_minutes > 0
         ? `<span class="badge badge-delay">+${train.delay_minutes} min delay</span>`
         : `<span class="badge badge-on-time">Active on Route</span>`;
 
     if (titleEl) titleEl.textContent = `🚆 Train ${train.train_number}`;
-    if (badgeEl) badgeEl.innerHTML = delayBadge;
+        if (badgeEl) badgeEl.innerHTML = delayBadge + activeDisruptionsHTML;
 
     const originStation = escapeHTML(train.first_station_name || 'Origin Station');
     const destStation = escapeHTML(train.last_station_name || 'Destination Station');
