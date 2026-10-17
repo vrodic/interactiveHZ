@@ -58,6 +58,9 @@ type RoutePlanEntry struct {
 	TransferStationName    string `json:"transfer_station_name,omitempty"`
 	AffectedByDisruption   bool   `json:"affected_by_disruption,omitempty"`
 	DisruptionNotice       string `json:"disruption_notice,omitempty"`
+	IsBusReplacement       bool   `json:"is_bus_replacement,omitempty"`
+	IsTrackWorks           bool   `json:"is_track_works,omitempty"`
+	NoticeID               string `json:"notice_id,omitempty"`
 }
 
 type DelayServiceStats struct {
@@ -112,6 +115,7 @@ type ActiveTrain struct {
 	ScheduledArrSec  int      `json:"scheduled_arr_sec"`
 	IsBusReplacement bool     `json:"is_bus_replacement,omitempty"`
 	IsTrackWorks     bool     `json:"is_track_works,omitempty"`
+	NoticeID         string   `json:"notice_id,omitempty"`
 	Path             []LatLon `json:"path,omitempty"`
 }
 
@@ -147,6 +151,7 @@ type TrainDetails struct {
 	IsActive              bool               `json:"is_active"`
 	IsBusReplacement      bool               `json:"is_bus_replacement,omitempty"`
 	IsTrackWorks          bool               `json:"is_track_works,omitempty"`
+	NoticeID              string             `json:"notice_id,omitempty"`
 	Notices               []NoticeResponse   `json:"notices,omitempty"`
 	Lat                   float64            `json:"lat,omitempty"`
 	Lon                   float64            `json:"lon,omitempty"`

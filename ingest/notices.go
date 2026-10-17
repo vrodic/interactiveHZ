@@ -318,6 +318,52 @@ func parseDatesFromText(text string) ([]string, string, string) {
 		dates = append(dates, formatted)
 	}
 
+	// Pattern DD. - DD.MM. e.g. 7. - 8.11. or 19. - 23.10.
+	reRangeShort := regexp.MustCompile(`\b(\d{1,2})\.\s*-\s*(\d{1,2})\.(\d{1,2})\.?`)
+	matchesRangeShort := reRangeShort.FindAllStringSubmatch(text, -1)
+	for _, m := range matchesRangeShort {
+		dStart, _ := strconv.Atoi(m[1])
+		dEnd, _ := strconv.Atoi(m[2])
+		month, _ := strconv.Atoi(m[3])
+		if month >= 1 && month <= 12 && dStart <= dEnd && dEnd <= 31 {
+			for d := dStart; d <= dEnd; d++ {
+				formatted := fmt.Sprintf("%04d-%02d-%02d", nowYear, month, d)
+				dates = append(dates, formatted)
+			}
+		}
+	}
+
+	// Pattern DD.MM. - DD.MM. e.g. 7.11. - 8.11.
+	reRangeFullMonth := regexp.MustCompile(`\b(\d{1,2})\.(\d{1,2})\.\s*-\s*(\d{1,2})\.(\d{1,2})\.?`)
+	matchesRangeFullMonth := reRangeFullMonth.FindAllStringSubmatch(text, -1)
+	for _, m := range matchesRangeFullMonth {
+		dStart, _ := strconv.Atoi(m[1])
+		mStart, _ := strconv.Atoi(m[2])
+		dEnd, _ := strconv.Atoi(m[3])
+		mEnd, _ := strconv.Atoi(m[4])
+		if mStart == mEnd && dStart <= dEnd && mStart >= 1 && mStart <= 12 {
+			for d := dStart; d <= dEnd; d++ {
+				formatted := fmt.Sprintf("%04d-%02d-%02d", nowYear, mStart, d)
+				dates = append(dates, formatted)
+			}
+		} else if mStart >= 1 && mStart <= 12 && mEnd >= 1 && mEnd <= 12 {
+			dates = append(dates, fmt.Sprintf("%04d-%02d-%02d", nowYear, mStart, dStart))
+			dates = append(dates, fmt.Sprintf("%04d-%02d-%02d", nowYear, mEnd, dEnd))
+		}
+	}
+
+	// Pattern single DD.MM. e.g. 18.10. (MUST have trailing dot to distinguish from time e.g. 4.05)
+	reSingleShort := regexp.MustCompile(`\b(\d{1,2})\.(\d{1,2})\.`)
+	matchesSingleShort := reSingleShort.FindAllStringSubmatch(text, -1)
+	for _, m := range matchesSingleShort {
+		day, _ := strconv.Atoi(m[1])
+		month, _ := strconv.Atoi(m[2])
+		if month >= 1 && month <= 12 && day >= 1 && day <= 31 {
+			formatted := fmt.Sprintf("%04d-%02d-%02d", nowYear, month, day)
+			dates = append(dates, formatted)
+		}
+	}
+
 	// Extract Croatian text dates with month names e.g. "22., 23., 26. i 27. listopada 2026."
 	reMonthText := regexp.MustCompile(`((?:\d{1,2}\.\s*(?:,\s*|i\s*|do\s*)?)+)\s*([a-čćžšđA-ČĆŽŠĐ]+)\s*(\d{4})?\.?`)
 	matchesMonth := reMonthText.FindAllStringSubmatch(lower, -1)

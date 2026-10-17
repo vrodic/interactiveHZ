@@ -939,6 +939,16 @@ function initNavHandlers() {
         });
     });
 
+    document.addEventListener('click', (evt) => {
+        const badge = evt.target.closest('.clickable-notice-badge');
+        if (badge) {
+            evt.stopPropagation();
+            evt.preventDefault();
+            const noticeId = badge.getAttribute('data-notice-id');
+            openNoticesModal(noticeId);
+        }
+    });
+
     initDelaysSSEStream();
 }
 
@@ -1449,6 +1459,14 @@ async function findRoutePlans() {
             const badgeStr = isNext ? '<span style="background: #00e5ff; color: #0f1217; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-left: 6px;">NEXT DEPARTURE</span>' : '';
             const transferBadge = r.is_transfer ? `<span style="background: #f59e0b; color: #0f1217; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-left: 4px;">1 TRANSFER (${escapeHTML(r.transfer_station_name)})</span>` : '';
 
+            let disruptionBadgesHTML = '';
+            if (r.is_bus_replacement) {
+                disruptionBadgesHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(r.notice_id || '')}" style="font-size: 9px; padding: 1px 4px; margin-left: 4px;">🚌 Bus</span> `;
+            }
+            if (r.is_track_works) {
+                disruptionBadgesHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(r.notice_id || '')}" style="font-size: 9px; padding: 1px 4px; margin-left: 4px;">🚧 Works</span>`;
+            }
+
             let disruptionNoticeHTML = '';
             if (r.affected_by_disruption) {
                 disruptionNoticeHTML = `<div style="font-size: 11px; color: #f59e0b; margin-top: 4px;">⚠️ <strong>Disruption Notice:</strong> ${escapeHTML(r.disruption_notice || 'Track works or bus replacement on route')}</div>`;
@@ -1460,7 +1478,7 @@ async function findRoutePlans() {
             rowsHTML += `
                 <tr style="${rowStyle}" class="${rowClass}">
                     <td style="padding: 10px;">🕒 ${depTimeHM} ➔ ${arrTimeHM} <span style="color: #a0aec0; font-size: 11px;">(${r.duration_minutes} min)</span></td>
-                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">Train ${escapeHTML(r.train_number)}</a>${badgeStr}${transferBadge}${disruptionNoticeHTML}</td>
+                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">Train ${escapeHTML(r.train_number)}</a> ${disruptionBadgesHTML}${badgeStr}${transferBadge}${disruptionNoticeHTML}</td>
                     <td style="padding: 10px;">${delayStr}</td>
                 </tr>
             `;
@@ -1905,10 +1923,10 @@ async function fetchAndDisplayTrainDetails(trainNum) {
 
         let disruptionBadgeHTML = '';
         if (data.is_bus_replacement) {
-            disruptionBadgeHTML += `<span class="notice-badge notice-badge-bus" style="margin-left: 6px;">🚌 Bus replacement</span>`;
+            disruptionBadgeHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(data.notice_id || '')}" style="margin-left: 6px;">🚌 Bus replacement</span>`;
         }
         if (data.is_track_works) {
-            disruptionBadgeHTML += `<span class="notice-badge notice-badge-works" style="margin-left: 6px;">🚧 Track works</span>`;
+            disruptionBadgeHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(data.notice_id || '')}" style="margin-left: 6px;">🚧 Track works</span>`;
         }
 
         if (data.is_active) {
@@ -2220,10 +2238,10 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
 
         let activeDisruptionsHTML = '';
         if (train.is_bus_replacement) {
-            activeDisruptionsHTML += `<span class="notice-badge notice-badge-bus" style="margin-left: 6px;">🚌 Bus replacement</span>`;
+            activeDisruptionsHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(train.notice_id || '')}" style="margin-left: 6px;">🚌 Bus replacement</span>`;
         }
         if (train.is_track_works) {
-            activeDisruptionsHTML += `<span class="notice-badge notice-badge-works" style="margin-left: 6px;">🚧 Track works</span>`;
+            activeDisruptionsHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(train.notice_id || '')}" style="margin-left: 6px;">🚧 Track works</span>`;
         }
 
     const delayBadge = train.delay_minutes > 0
