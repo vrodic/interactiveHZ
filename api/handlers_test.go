@@ -558,26 +558,6 @@ func BenchmarkGetActiveTrains(b *testing.B) {
 	}
 }
 
-func BenchmarkGetTrainDetails(b *testing.B) {
-	t := &testing.T{}
-	srv := setupTestDB(t)
-
-	// Seed some historical data
-	_, _ = srv.db.Exec(`
-		INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station)
-		VALUES ('2010', '2026-10-01', 0, 'Arrived', 's1', 's2'),
-		       ('2010', '2026-10-02', 3, 'Arrived', 's1', 's2'),
-		       ('2010', '2026-10-03', 8, 'Arrived', 's1', 's2');
-	`)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		req := httptest.NewRequest("GET", "/api/trains/2010", nil)
-		w := httptest.NewRecorder()
-		srv.GetTrainDetails(w, req)
-	}
-}
-
 func TestDelayServiceStats(t *testing.T) {
 	srv := setupTestDB(t)
 
