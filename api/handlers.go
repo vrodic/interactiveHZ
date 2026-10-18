@@ -56,6 +56,18 @@ func (b *Broadcaster) Broadcast(msg string) {
 	}
 }
 
+var (
+	zagrebLoc *time.Location
+)
+
+func init() {
+	loc, err := time.LoadLocation("Europe/Zagreb")
+	if err != nil {
+		loc = time.FixedZone("CEST", 2*3600)
+	}
+	zagrebLoc = loc
+}
+
 type cachedDelay struct {
 	response  DelayAPIResponse
 	timestamp time.Time
@@ -69,19 +81,36 @@ type pendingSpikeRecord struct {
 	timestamp      time.Time
 }
 
+type scheduleBounds struct {
+	firstDepSec int
+	lastArrSec  int
+}
+
+type activeTrainsCacheEntry struct {
+	data      []byte
+	timestamp time.Time
+}
+
 type Server struct {
 	db                  *sql.DB
 	osmGraph            *OSMGraph
+	httpClient          *http.Client
 	delayCache          sync.Map
 	pendingSpikes       sync.Map
-	routeCache          sync.Map
+	lastQueried         sync.Map
+	scheduleBoundsCache sync.Map
 	tripTerminalsCache  sync.Map
+	stationsMap         sync.Map // stop_id -> Station
+	stationsLoaded      bool
+	stationsMu          sync.RWMutex
+	activeTrainsCacheMu sync.RWMutex
+	activeTrainsCache   *activeTrainsCacheEntry
+	routeCache          sync.Map
 	segmentsCache       []SegmentSpeed
 	segmentsJSON        []byte
 	segmentsEtag        string
 	segmentsMu          sync.RWMutex
 	broadcaster         *Broadcaster
-	httpClient          *http.Client
 	delayStatsMu        sync.Mutex
 	delayTotalCalls     int64
 	delaySuccessCalls   int64
@@ -91,19 +120,64 @@ type Server struct {
 }
 
 func NewServer(db *sql.DB) *Server {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.MaxIdleConns = 50
-	tr.MaxIdleConnsPerHost = 20
-	tr.IdleConnTimeout = 90 * time.Second
-
+	tr := &http.Transport{
+		MaxIdleConns:        50,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	return &Server{
 		db:          db,
+		httpClient:  &http.Client{Transport: tr, Timeout: 8 * time.Second},
 		broadcaster: NewBroadcaster(),
-		httpClient: &http.Client{
-			Timeout:   8 * time.Second,
-			Transport: tr,
-		},
 	}
+}
+
+func (s *Server) ensureStationsLoaded() {
+	s.stationsMu.RLock()
+	if s.stationsLoaded {
+		s.stationsMu.RUnlock()
+		return
+	}
+	s.stationsMu.RUnlock()
+
+	s.stationsMu.Lock()
+	defer s.stationsMu.Unlock()
+	if s.stationsLoaded {
+		return
+	}
+
+	rows, err := s.db.Query("SELECT stop_id, stop_name, stop_lat, stop_lon FROM stations")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var st Station
+		if err := rows.Scan(&st.StopID, &st.StopName, &st.Lat, &st.Lon); err == nil {
+			s.stationsMap.Store(st.StopID, st)
+			count++
+		}
+	}
+	if count > 0 {
+		s.stationsLoaded = true
+	}
+}
+
+func (s *Server) getStation(stopID string) (Station, bool) {
+	s.ensureStationsLoaded()
+	val, ok := s.stationsMap.Load(stopID)
+	if ok {
+		return val.(Station), true
+	}
+	return Station{}, false
+}
+
+func (s *Server) invalidateActiveTrainsCache() {
+	s.activeTrainsCacheMu.Lock()
+	s.activeTrainsCache = nil
+	s.activeTrainsCacheMu.Unlock()
 }
 
 func (s *Server) recordDelayServiceCall(success bool) {
@@ -166,11 +240,7 @@ func (s *Server) GetDelayServiceStats() DelayServiceStats {
 }
 
 func getZagrebTime() time.Time {
-	loc, err := time.LoadLocation("Europe/Zagreb")
-	if err != nil {
-		loc = time.FixedZone("CEST", 2*3600)
-	}
-	return time.Now().In(loc)
+	return time.Now().In(zagrebLoc)
 }
 
 func parseTimeParam(tsStr string, defaultSec int) int {
@@ -223,6 +293,8 @@ func stripSeconds(timeStr string) string {
 func (s *Server) SetOSMGraph(graph *OSMGraph) {
 	s.osmGraph = graph
 	s.routeCache = sync.Map{}
+	s.scheduleBoundsCache = sync.Map{}
+	s.tripTerminalsCache = sync.Map{}
 	s.InvalidateSegmentsCache()
 }
 
@@ -289,39 +361,10 @@ func (s *Server) InvalidateSegmentsCache() {
 	s.segmentsJSON = nil
 	s.segmentsEtag = ""
 	s.segmentsMu.Unlock()
-}
 
-type tripTerminals struct {
-	firstStationName string
-	lastStationName  string
-}
-
-func (s *Server) getTripTerminals(tripID string) (string, string) {
-	if val, ok := s.tripTerminalsCache.Load(tripID); ok {
-		t := val.(tripTerminals)
-		return t.firstStationName, t.lastStationName
-	}
-
-	var firstName, lastName string
-	query := `
-		SELECT s_first.stop_name, s_last.stop_name
-		FROM stop_times st_first
-		JOIN stations s_first ON st_first.stop_id = s_first.stop_id
-		JOIN stop_times st_last ON st_last.trip_id = st_first.trip_id AND st_last.stop_sequence = (
-			SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = ?
-		)
-		JOIN stations s_last ON st_last.stop_id = s_last.stop_id
-		WHERE st_first.trip_id = ? AND st_first.stop_sequence = 1
-	`
-	if err := s.db.QueryRow(query, tripID, tripID).Scan(&firstName, &lastName); err == nil {
-		s.tripTerminalsCache.Store(tripID, tripTerminals{
-			firstStationName: firstName,
-			lastStationName:  lastName,
-		})
-		return firstName, lastName
-	}
-
-	return "", ""
+	s.stationsMu.Lock()
+	s.stationsLoaded = false
+	s.stationsMu.Unlock()
 }
 
 func (s *Server) getRouteWaypoints(fromID, toID string, s1Lat, s1Lon, s2Lat, s2Lon float64) []LatLon {
@@ -752,7 +795,36 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(entries)
 }
 
+func (s *Server) getTripTerminals(tripID string) (firstStation, lastStation string) {
+	if val, ok := s.tripTerminalsCache.Load(tripID); ok {
+		terms := val.([2]string)
+		return terms[0], terms[1]
+	}
+
+	var firstID, lastID string
+	err := s.db.QueryRow(`
+		SELECT
+			(SELECT stop_id FROM stop_times WHERE trip_id = ? ORDER BY stop_sequence ASC LIMIT 1),
+			(SELECT stop_id FROM stop_times WHERE trip_id = ? ORDER BY stop_sequence DESC LIMIT 1)
+	`, tripID, tripID).Scan(&firstID, &lastID)
+
+	var firstName, lastName string
+	if err == nil {
+		if st, ok := s.getStation(firstID); ok {
+			firstName = st.StopName
+		}
+		if st, ok := s.getStation(lastID); ok {
+			lastName = st.StopName
+		}
+	}
+
+	terms := [2]string{firstName, lastName}
+	s.tripTerminalsCache.Store(tripID, terms)
+	return firstName, lastName
+}
+
 func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
+	s.ensureStationsLoaded()
 	zgNow := getZagrebTime()
 
 	delayMap := make(map[string]int)
@@ -773,42 +845,49 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 
 	calCond, calArgs := getCalendarCondition(zgNow)
 
+	calCondInTrips := strings.ReplaceAll(calCond, "t.service_id", "t2.service_id")
+
 	query := fmt.Sprintf(`
 		SELECT t.trip_id, COALESCE(t.trip_short_name, t.trip_id), COALESCE(t.trip_headsign, ''),
-		       st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon, st1.departure_seconds,
-		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon, st2.arrival_seconds
-		FROM stop_times st1
-		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
-		JOIN stations s1 ON st1.stop_id = s1.stop_id
-		JOIN stations s2 ON st2.stop_id = s2.stop_id
-		JOIN trips t ON st1.trip_id = t.trip_id
-		LEFT JOIN calendar c ON t.service_id = c.service_id
-		WHERE st1.departure_seconds <= ? AND st2.arrival_seconds >= ? AND %s
-	`, calCond)
+		       st1.stop_id, st1.departure_seconds,
+		       st2.stop_id, st2.arrival_seconds
+		FROM trips t
+		JOIN stop_times st1 ON st1.trip_id = t.trip_id
+		JOIN stop_times st2 ON st2.trip_id = t.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
+		WHERE t.trip_id IN (
+			SELECT t2.trip_id FROM trips t2
+			LEFT JOIN calendar c ON t2.service_id = c.service_id
+			WHERE %s
+		)
+		AND st1.departure_seconds <= ? AND st2.arrival_seconds >= ?
+	`, calCondInTrips)
 
-	args := append([]interface{}{windowEnd, windowStart}, calArgs...)
+	args := append(calArgs, windowEnd, windowStart)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
+		fmt.Printf("ComputeActiveTrains DB Query Error: %v\n", err)
 		return nil, err
 	}
 	defer rows.Close()
 
 	activeTrainsMap := make(map[string]ActiveTrain)
-	var activeTripIDs []string
-	tripIDToTrainNum := make(map[string]string)
 
 	for rows.Next() {
 		var (
 			tripID, trainNum, headsign string
-			s1ID, s1Name               string
-			s1Lat, s1Lon               float64
+			s1ID                       string
 			s1DepSec                   int
-			s2ID, s2Name               string
-			s2Lat, s2Lon               float64
+			s2ID                       string
 			s2ArrSec                   int
 		)
 
-		if err := rows.Scan(&tripID, &trainNum, &headsign, &s1ID, &s1Name, &s1Lat, &s1Lon, &s1DepSec, &s2ID, &s2Name, &s2Lat, &s2Lon, &s2ArrSec); err != nil {
+		if err := rows.Scan(&tripID, &trainNum, &headsign, &s1ID, &s1DepSec, &s2ID, &s2ArrSec); err != nil {
+			continue
+		}
+
+		s1, ok1 := s.getStation(s1ID)
+		s2, ok2 := s.getStation(s2ID)
+		if !ok1 || !ok2 {
 			continue
 		}
 
@@ -832,49 +911,38 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 				status = "at_station"
 			}
 
-			pathWaypoints := s.getRouteWaypoints(s1ID, s2ID, s1Lat, s1Lon, s2Lat, s2Lon)
+			pathWaypoints := s.getRouteWaypoints(s1ID, s2ID, s1.Lat, s1.Lon, s2.Lat, s2.Lon)
 			curLat, curLon := interpolateAlongPath(pathWaypoints, progress)
 
 			if existing, ok := activeTrainsMap[trainNum]; !ok || (progress > 0 && progress < 1 && (existing.Progress <= 0 || existing.Progress >= 1)) {
-				if !ok {
-					activeTripIDs = append(activeTripIDs, tripID)
-					tripIDToTrainNum[tripID] = trainNum
+				firstSt, lastSt := s.getTripTerminals(tripID)
+				if firstSt == "" {
+					firstSt = headsign
 				}
-				activeTrainsMap[trainNum] = ActiveTrain{
-					TripID:          tripID,
-					TrainNumber:     trainNum,
-					Headsign:        headsign,
-					CurrentLat:      curLat,
-					CurrentLon:      curLon,
-					PrevStationID:   s1ID,
-					PrevStationName: s1Name,
-					NextStationID:   s2ID,
-					NextStationName: s2Name,
-					SegmentID:       s1ID + "->" + s2ID,
-					Progress:        progress,
-					Status:          status,
-					DelayMinutes:    delayMinutes,
-					ScheduledDepSec: s1DepSec,
-					ScheduledArrSec: s2ArrSec,
+				if lastSt == "" {
+					lastSt = headsign
 				}
-			}
-		}
-	}
 
-	for tid, trNum := range tripIDToTrainNum {
-		if tr, ok := activeTrainsMap[trNum]; ok {
-			fName, lName := s.getTripTerminals(tid)
-			if fName != "" {
-				tr.FirstStationName = fName
-			} else {
-				tr.FirstStationName = tr.Headsign
+				activeTrainsMap[trainNum] = ActiveTrain{
+					TripID:           tripID,
+					TrainNumber:      trainNum,
+					Headsign:         headsign,
+					CurrentLat:       curLat,
+					CurrentLon:       curLon,
+					PrevStationID:    s1ID,
+					PrevStationName:  s1.StopName,
+					NextStationID:    s2ID,
+					NextStationName:  s2.StopName,
+					FirstStationName: firstSt,
+					LastStationName:  lastSt,
+					SegmentID:        s1ID + "->" + s2ID,
+					Progress:         progress,
+					Status:           status,
+					DelayMinutes:     delayMinutes,
+					ScheduledDepSec:  s1DepSec,
+					ScheduledArrSec:  s2ArrSec,
+				}
 			}
-			if lName != "" {
-				tr.LastStationName = lName
-			} else {
-				tr.LastStationName = tr.Headsign
-			}
-			activeTrainsMap[trNum] = tr
 		}
 	}
 
@@ -904,39 +972,8 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 	return activeTrains, nil
 }
 
-func (s *Server) findTripForTrain(trainNum string, zgNow time.Time) (string, string, error) {
-	calCond, calArgs := getCalendarCondition(zgNow)
-	query := fmt.Sprintf(`
-		SELECT t.trip_id, COALESCE(t.trip_headsign, '')
-		FROM trips t
-		LEFT JOIN calendar c ON t.service_id = c.service_id
-		WHERE (t.trip_short_name = ? OR t.trip_id = ?) AND %s
-		LIMIT 1
-	`, calCond)
-
-	args := []interface{}{trainNum, trainNum}
-	args = append(args, calArgs...)
-
-	var tripID, headsign string
-	err := s.db.QueryRow(query, args...).Scan(&tripID, &headsign)
-	if err == nil {
-		return tripID, headsign, nil
-	}
-
-	fallbackQuery := `
-		SELECT trip_id, COALESCE(trip_headsign, '')
-		FROM trips
-		WHERE trip_short_name = ? OR trip_id = ?
-		LIMIT 1
-	`
-	err = s.db.QueryRow(fallbackQuery, trainNum, trainNum).Scan(&tripID, &headsign)
-	if err != nil {
-		return "", "", err
-	}
-	return tripID, headsign, nil
-}
-
 func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
+	s.ensureStationsLoaded()
 	trainNum := strings.TrimPrefix(r.URL.Path, "/api/trains/")
 	trainNum = strings.TrimSpace(trainNum)
 	if trainNum == "" {
@@ -953,18 +990,65 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 	var details TrainDetails
 	details.TrainNumber = trainNum
 
-	tripID, headsign, err := s.findTripForTrain(trainNum, zgNow)
+	calCond, calArgs := getCalendarCondition(zgNow)
+
+	query := fmt.Sprintf(`
+		SELECT t.trip_id, COALESCE(t.trip_headsign, ''),
+		       s_first.stop_name, st_first.departure_time, st_first.departure_seconds,
+		       s_last.stop_name, st_last.arrival_time, st_last.arrival_seconds
+		FROM trips t
+		LEFT JOIN calendar c ON t.service_id = c.service_id
+		JOIN stop_times st_first ON st_first.trip_id = t.trip_id AND st_first.stop_sequence = 1
+		JOIN stations s_first ON st_first.stop_id = s_first.stop_id
+		JOIN stop_times st_last ON st_last.trip_id = t.trip_id AND st_last.stop_sequence = (
+			SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id
+		)
+		JOIN stations s_last ON st_last.stop_id = s_last.stop_id
+		WHERE (t.trip_short_name = ? OR t.trip_id = ?) AND %s
+		ORDER BY (
+			SELECT COUNT(*) FROM stop_times WHERE trip_id = t.trip_id
+		) DESC
+		LIMIT 1
+	`, calCond)
+
+	queryArgs := []interface{}{trainNum, trainNum}
+	queryArgs = append(queryArgs, calArgs...)
+
+	err := s.db.QueryRow(query, queryArgs...).Scan(
+		&details.TripID, &details.Headsign,
+		&details.FirstStationName, &details.FirstDepartureTime, &details.FirstDepartureSeconds,
+		&details.LastStationName, &details.LastArrivalTime, &details.LastArrivalSeconds,
+	)
+	if err != nil {
+		// Fallback query if no active trip matches calendar for today
+		fallbackQuery := `
+			SELECT t.trip_id, COALESCE(t.trip_headsign, ''),
+			       s_first.stop_name, st_first.departure_time, st_first.departure_seconds,
+			       s_last.stop_name, st_last.arrival_time, st_last.arrival_seconds
+			FROM trips t
+			JOIN stop_times st_first ON st_first.trip_id = t.trip_id AND st_first.stop_sequence = 1
+			JOIN stations s_first ON st_first.stop_id = s_first.stop_id
+			JOIN stop_times st_last ON st_last.trip_id = t.trip_id AND st_last.stop_sequence = (
+				SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id
+			)
+			JOIN stations s_last ON st_last.stop_id = s_last.stop_id
+			WHERE t.trip_short_name = ? OR t.trip_id = ?
+			ORDER BY (
+				SELECT COUNT(*) FROM stop_times WHERE trip_id = t.trip_id
+			) DESC
+			LIMIT 1
+		`
+		err = s.db.QueryRow(fallbackQuery, trainNum, trainNum).Scan(
+			&details.TripID, &details.Headsign,
+			&details.FirstStationName, &details.FirstDepartureTime, &details.FirstDepartureSeconds,
+			&details.LastStationName, &details.LastArrivalTime, &details.LastArrivalSeconds,
+		)
+	}
 	if err != nil {
 		http.Error(w, "Train not found", http.StatusNotFound)
 		return
 	}
 
-	details.TripID = tripID
-	details.Headsign = headsign
-
-	fName, lName := s.getTripTerminals(tripID)
-	details.FirstStationName = fName
-	details.LastStationName = lName
 	if details.FirstStationName == "" {
 		details.FirstStationName = details.Headsign
 	}
@@ -972,56 +1056,47 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 		details.LastStationName = details.Headsign
 	}
 
-	_ = s.db.QueryRow("SELECT departure_time, departure_seconds FROM stop_times WHERE trip_id = ? ORDER BY stop_sequence ASC LIMIT 1", tripID).Scan(&details.FirstDepartureTime, &details.FirstDepartureSeconds)
-	_ = s.db.QueryRow("SELECT arrival_time, arrival_seconds FROM stop_times WHERE trip_id = ? ORDER BY stop_sequence DESC LIMIT 1", tripID).Scan(&details.LastArrivalTime, &details.LastArrivalSeconds)
-
 	var delayMins int
 	var posStatus string
 	_ = s.db.QueryRow("SELECT delay_minutes, COALESCE(position_status, '') FROM train_delays WHERE train_number = ?", trainNum).Scan(&delayMins, &posStatus)
-	if delayMins == 0 {
-		if del, found := s.getTrainDelayMinutes(trainNum); found {
-			delayMins = del
-		}
-	}
 	details.DelayMinutes = delayMins
 	details.PositionStatus = posStatus
 
+	// Targeted calculation for single train active status & coordinates using details.TripID directly
 	effectiveTime := nowSec - (delayMins * 60)
 	activeQuery := `
-		SELECT st1.stop_id, s1.stop_name, s1.stop_lat, s1.stop_lon, st1.departure_seconds,
-		       st2.stop_id, s2.stop_name, s2.stop_lat, s2.stop_lon, st2.arrival_seconds
+		SELECT st1.stop_id, st1.departure_seconds,
+		       st2.stop_id, st2.arrival_seconds
 		FROM stop_times st1
 		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
-		JOIN stations s1 ON st1.stop_id = s1.stop_id
-		JOIN stations s2 ON st2.stop_id = s2.stop_id
 		WHERE st1.trip_id = ?
 		  AND st1.departure_seconds <= ? AND st2.arrival_seconds >= ?
 		LIMIT 1
 	`
 
 	var (
-		s1ID, s1Name     string
-		s1Lat, s1Lon     float64
-		s1DepSec         int
-		s2ID, s2Name     string
-		s2Lat, s2Lon     float64
-		s2ArrSec         int
+		s1ID, s2ID       string
+		s1DepSec, s2ArrSec int
 	)
-	if err := s.db.QueryRow(activeQuery, tripID, effectiveTime, effectiveTime).Scan(&s1ID, &s1Name, &s1Lat, &s1Lon, &s1DepSec, &s2ID, &s2Name, &s2Lat, &s2Lon, &s2ArrSec); err == nil {
-		details.IsActive = true
-		duration := float64(s2ArrSec - s1DepSec)
-		progress := 0.0
-		if duration > 0 {
-			progress = float64(effectiveTime-s1DepSec) / duration
-			if progress < 0 {
-				progress = 0
+	if err := s.db.QueryRow(activeQuery, details.TripID, effectiveTime, effectiveTime).Scan(&s1ID, &s1DepSec, &s2ID, &s2ArrSec); err == nil {
+		s1, ok1 := s.getStation(s1ID)
+		s2, ok2 := s.getStation(s2ID)
+		if ok1 && ok2 {
+			details.IsActive = true
+			duration := float64(s2ArrSec - s1DepSec)
+			progress := 0.0
+			if duration > 0 {
+				progress = float64(effectiveTime-s1DepSec) / duration
+				if progress < 0 {
+					progress = 0
+				}
+				if progress > 1 {
+					progress = 1
+				}
 			}
-			if progress > 1 {
-				progress = 1
-			}
+			pathWaypoints := s.getRouteWaypoints(s1ID, s2ID, s1.Lat, s1.Lon, s2.Lat, s2.Lon)
+			details.Lat, details.Lon = interpolateAlongPath(pathWaypoints, progress)
 		}
-		pathWaypoints := s.getRouteWaypoints(s1ID, s2ID, s1Lat, s1Lon, s2Lat, s2Lon)
-		details.Lat, details.Lon = interpolateAlongPath(pathWaypoints, progress)
 	}
 
 	details.DelayDistribution = s.computeDelayDistribution(trainNum)
@@ -1067,10 +1142,7 @@ func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
 	defer rows.Close()
 
 	logs := make([]RecentDelayLog, 0)
-	loc, _ := time.LoadLocation("Europe/Zagreb")
-	if loc == nil {
-		loc = time.FixedZone("CEST", 2*3600)
-	}
+	loc := zagrebLoc
 
 	for rows.Next() {
 		var l RecentDelayLog
@@ -1153,9 +1225,23 @@ func (s *Server) computeDelayDistribution(trainNum string) *DelayDistribution {
 }
 
 func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
+	timeParam := r.URL.Query().Get("time")
 	zgNow := getZagrebTime()
 	secondsOfDay := zgNow.Hour()*3600 + zgNow.Minute()*60 + zgNow.Second()
-	secondsOfDay = parseTimeParam(r.URL.Query().Get("time"), secondsOfDay)
+
+	if timeParam == "" {
+		s.activeTrainsCacheMu.RLock()
+		if s.activeTrainsCache != nil && time.Since(s.activeTrainsCache.timestamp) < 2*time.Second {
+			data := s.activeTrainsCache.data
+			s.activeTrainsCacheMu.RUnlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(data)
+			return
+		}
+		s.activeTrainsCacheMu.RUnlock()
+	}
+
+	secondsOfDay = parseTimeParam(timeParam, secondsOfDay)
 
 	activeTrains, err := s.ComputeActiveTrains(secondsOfDay)
 	if err != nil {
@@ -1163,8 +1249,23 @@ func (s *Server) GetActiveTrains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	data, err := json.Marshal(activeTrains)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if timeParam == "" {
+		s.activeTrainsCacheMu.Lock()
+		s.activeTrainsCache = &activeTrainsCacheEntry{
+			data:      data,
+			timestamp: time.Now(),
+		}
+		s.activeTrainsCacheMu.Unlock()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(activeTrains)
+	w.Write(data)
 }
 
 func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
@@ -1411,6 +1512,7 @@ func (s *Server) GetSegmentDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, error) {
+	s.lastQueried.Store(trainID, time.Now())
 	zgNow := getZagrebTime()
 	todayStr := zgNow.Format("2006-01-02")
 
@@ -1449,12 +1551,7 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 	}
 
 	url := fmt.Sprintf("https://hzpp.app/api/train-delay?trainId=%s", trainID)
-	client := s.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second}
-	}
-
-	resp, err := client.Get(url)
+	resp, err := s.httpClient.Get(url)
 	if err != nil {
 		s.recordDelayServiceCall(false)
 		if cached, ok := s.delayCache.Load(trainID); ok {
@@ -1481,14 +1578,22 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 
 		nowSec := zgNow.Hour()*3600 + zgNow.Minute()*60 + zgNow.Second()
 
-		var firstDepSec, lastArrSec int
-		errSchedule := s.db.QueryRow(`
-			SELECT MIN(st_first.departure_seconds), MAX(st_last.arrival_seconds)
-			FROM stop_times st_first
-			JOIN trips t ON st_first.trip_id = t.trip_id
-			JOIN stop_times st_last ON st_last.trip_id = t.trip_id
-			WHERE COALESCE(t.trip_short_name, t.trip_id) = ?
-		`, trainID).Scan(&firstDepSec, &lastArrSec)
+		var bounds scheduleBounds
+		var errSchedule error
+		if val, ok := s.scheduleBoundsCache.Load(trainID); ok {
+			bounds = val.(scheduleBounds)
+		} else {
+			errSchedule = s.db.QueryRow(`
+				SELECT MIN(st.departure_seconds), MAX(st.arrival_seconds)
+				FROM stop_times st
+				JOIN trips t ON st.trip_id = t.trip_id
+				WHERE (t.trip_short_name = ? OR t.trip_id = ?)
+			`, trainID, trainID).Scan(&bounds.firstDepSec, &bounds.lastArrSec)
+			if errSchedule == nil {
+				s.scheduleBoundsCache.Store(trainID, bounds)
+			}
+		}
+		firstDepSec, lastArrSec := bounds.firstDepSec, bounds.lastArrSec
 
 		isArrivedStatus := strings.EqualFold(strings.TrimSpace(delayResp.Data.PositionStatus), "arrived")
 
@@ -1542,10 +1647,7 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 			`, trainID).Scan(&lastHistDelay, &lastHistStatus, &lastHistLastSt, &lastHistNextSt, &lastHistTimeStr)
 
 			if errHist == nil {
-				loc, _ := time.LoadLocation("Europe/Zagreb")
-				if loc == nil {
-					loc = time.FixedZone("CEST", 2*3600)
-				}
+				loc := zagrebLoc
 				lastHistTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", lastHistTimeStr, loc)
 				if parseErr != nil {
 					lastHistTime, parseErr = time.ParseInLocation(time.RFC3339, lastHistTimeStr, loc)
@@ -1630,6 +1732,8 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 					VALUES (?, ?, ?, ?, ?, ?, ?)
 				`, trainID, todayStr, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt, nowZagrebStr)
 			}
+
+			s.invalidateActiveTrainsCache()
 
 			eventJSON, _ := json.Marshal(map[string]interface{}{
 				"type":                "delay_update",
@@ -1739,10 +1843,10 @@ func (s *Server) autoGenerateMissingArrivals() {
 	defer rows.Close()
 
 	type unarrivedTrain struct {
-		trainNum string
+		trainNum   string
 		lastArrSec int
-		destName string
-		delayMins int
+		destName   string
+		delayMins  int
 	}
 	var unarrived []unarrivedTrain
 
@@ -1753,49 +1857,78 @@ func (s *Server) autoGenerateMissingArrivals() {
 		}
 	}
 
+	if len(unarrived) == 0 {
+		return
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+
+	stmtUpdate, err := tx.Prepare(`
+		UPDATE train_delays
+		SET position_status = 'arrived',
+			last_station = ?,
+			next_station = '',
+			updated_at = ?
+		WHERE train_number = ?
+	`)
+	if err != nil {
+		return
+	}
+	defer stmtUpdate.Close()
+
+	stmtCheckHist, err := tx.Prepare(`
+		SELECT COUNT(*) FROM historical_train_delays
+		WHERE train_number = ? AND delay_date = ? AND LOWER(position_status) = 'arrived'
+	`)
+	if err != nil {
+		return
+	}
+	defer stmtCheckHist.Close()
+
+	stmtInsertHist, err := tx.Prepare(`
+		INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
+		VALUES (?, ?, ?, 'arrived', ?, '', ?)
+	`)
+	if err != nil {
+		return
+	}
+	defer stmtInsertHist.Close()
+
 	for _, u := range unarrived {
 		effectiveSec := u.lastArrSec + (u.delayMins * 60)
 		dayBase := time.Date(zgNow.Year(), zgNow.Month(), zgNow.Day(), 0, 0, 0, 0, zgNow.Location())
 		arrTimestampStr := dayBase.Add(time.Duration(effectiveSec) * time.Second).Format("2006-01-02 15:04:05")
 
-		// Update train_delays table
-		_, _ = s.db.Exec(`
-			UPDATE train_delays
-			SET position_status = 'arrived',
-				last_station = ?,
-				next_station = '',
-				updated_at = ?
-			WHERE train_number = ?
-		`, u.destName, arrTimestampStr, u.trainNum)
+		_, _ = stmtUpdate.Exec(u.destName, arrTimestampStr, u.trainNum)
 
-		// Check if historical arrival record already exists for today
 		var existingArrived int
-		_ = s.db.QueryRow(`
-			SELECT COUNT(*) FROM historical_train_delays
-			WHERE train_number = ? AND delay_date = ? AND LOWER(position_status) = 'arrived'
-		`, u.trainNum, todayStr).Scan(&existingArrived)
+		_ = stmtCheckHist.QueryRow(u.trainNum, todayStr).Scan(&existingArrived)
 
 		if existingArrived == 0 {
-			_, _ = s.db.Exec(`
-				INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
-				VALUES (?, ?, ?, 'arrived', ?, '', ?)
-			`, u.trainNum, todayStr, u.delayMins, u.destName, arrTimestampStr)
+			_, _ = stmtInsertHist.Exec(u.trainNum, todayStr, u.delayMins, u.destName, arrTimestampStr)
 		}
 	}
+
+	_ = tx.Commit()
 }
 
 func (s *Server) StartBackgroundDelayWorker() {
-	lastQueried := make(map[string]time.Time)
-	var mu sync.Mutex
-
 	ticker := time.NewTicker(20 * time.Second)
+	tickCount := 0
 	go func() {
 		for range ticker.C {
+			tickCount++
 			zgNow := getZagrebTime()
 			nowSec := zgNow.Hour()*3600 + zgNow.Minute()*60 + zgNow.Second()
 			todayStr := zgNow.Format("2006-01-02")
 
-			s.autoGenerateMissingArrivals()
+			if tickCount%6 == 1 { // Runs every 2 minutes (6 * 20s)
+				s.autoGenerateMissingArrivals()
+			}
 
 			calCond, calArgs := getCalendarCondition(zgNow)
 
@@ -1833,24 +1966,12 @@ func (s *Server) StartBackgroundDelayWorker() {
 			}
 			rows.Close()
 
-			mu.Lock()
-			now := time.Now()
-			for tn, tTime := range lastQueried {
-				if now.Sub(tTime) > 1*time.Hour {
-					delete(lastQueried, tn)
-				}
-			}
-			mu.Unlock()
-
 			for _, tn := range trainNums {
-				mu.Lock()
-				lastTime, exists := lastQueried[tn]
-				if exists && time.Since(lastTime) < 60*time.Second {
-					mu.Unlock()
-					continue
+				if val, ok := s.lastQueried.Load(tn); ok {
+					if lastTime, ok := val.(time.Time); ok && time.Since(lastTime) < 60*time.Second {
+						continue
+					}
 				}
-				lastQueried[tn] = time.Now()
-				mu.Unlock()
 
 				_, _ = s.FetchAndSaveTrainDelay(tn)
 				time.Sleep(3 * time.Second)

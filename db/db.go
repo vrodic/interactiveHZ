@@ -27,6 +27,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+
 	if _, err := database.Exec("PRAGMA busy_timeout = 5000;"); err != nil {
 		log.Printf("Warning: failed to set busy timeout: %v", err)
 	}
@@ -73,13 +74,11 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		stop_sequence INTEGER NOT NULL
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_stop_times_trip_id ON stop_times(trip_id);
 	CREATE INDEX IF NOT EXISTS idx_stop_times_stop_id ON stop_times(stop_id);
 	CREATE INDEX IF NOT EXISTS idx_stop_times_trip_seq ON stop_times(trip_id, stop_sequence);
 	CREATE INDEX IF NOT EXISTS idx_stop_times_dep_arr ON stop_times(departure_seconds, arrival_seconds);
 	CREATE INDEX IF NOT EXISTS idx_stop_times_dep_arr_trip ON stop_times(departure_seconds, arrival_seconds, trip_id);
 	CREATE INDEX IF NOT EXISTS idx_trips_short_name ON trips(trip_short_name);
-	CREATE INDEX IF NOT EXISTS idx_trips_short_name_id ON trips(trip_short_name, trip_id);
 	CREATE INDEX IF NOT EXISTS idx_trips_service_id ON trips(service_id);
 
 	CREATE TABLE IF NOT EXISTS calendar (
@@ -111,6 +110,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		next_station TEXT,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
+	CREATE INDEX IF NOT EXISTS idx_train_delays_updated ON train_delays(updated_at);
 
 	CREATE TABLE IF NOT EXISTS historical_train_delays (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,7 +125,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 
 	CREATE INDEX IF NOT EXISTS idx_hist_delays_date ON historical_train_delays(delay_date);
 	CREATE INDEX IF NOT EXISTS idx_hist_delays_train_date ON historical_train_delays(train_number, delay_date);
-	CREATE INDEX IF NOT EXISTS idx_hist_delays_train_updated ON historical_train_delays(train_number, updated_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_hist_delays_train_updated ON historical_train_delays(train_number, updated_at DESC, id DESC);
 
 	CREATE TABLE IF NOT EXISTS route_segments (
 		from_stop_id TEXT NOT NULL,
@@ -156,8 +156,10 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
 
-	// Migration for existing databases
+
 	_, _ = database.Exec("ALTER TABLE traffic_notices ADD COLUMN dates_json TEXT;")
+
+	_, _ = database.Exec("DROP INDEX IF EXISTS idx_stop_times_trip_id;")
 
 	var segCount int
 	_ = database.QueryRow("SELECT COUNT(*) FROM route_segments").Scan(&segCount)
