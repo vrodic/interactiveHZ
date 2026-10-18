@@ -518,6 +518,137 @@ func (s *Server) Search(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+func (s *Server) GetNotices(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT id, category, title, content, parsed_stations, parsed_trains, pdf_urls,
+		       is_bus_replacement, is_track_works, COALESCE(date_from, ''), COALESCE(date_to, ''),
+		       COALESCE(dates_json, '[]'), updated_at
+		FROM traffic_notices
+		ORDER BY is_track_works DESC, is_bus_replacement DESC, id ASC
+	`)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	notices := make([]NoticeResponse, 0)
+	for rows.Next() {
+		var n NoticeResponse
+		var stJSON, trJSON, pdfJSON, datesJSONStr string
+		var isBus, isWorks int
+
+		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &datesJSONStr, &n.UpdatedAt); err != nil {
+			continue
+		}
+
+		_ = json.Unmarshal([]byte(stJSON), &n.ParsedStations)
+		_ = json.Unmarshal([]byte(trJSON), &n.ParsedTrains)
+		_ = json.Unmarshal([]byte(pdfJSON), &n.PDFURLs)
+		_ = json.Unmarshal([]byte(datesJSONStr), &n.DatesJSON)
+
+		n.IsBusReplacement = isBus == 1
+		n.IsTrackWorks = isWorks == 1
+
+		notices = append(notices, n)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(notices)
+}
+
+func (s *Server) fetchNoticesFromDB() []NoticeResponse {
+	rows, err := s.db.Query(`
+		SELECT id, category, title, content, parsed_stations, parsed_trains, pdf_urls,
+		       is_bus_replacement, is_track_works, COALESCE(date_from, ''), COALESCE(date_to, ''),
+		       COALESCE(dates_json, '[]'), updated_at
+		FROM traffic_notices
+	`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var notices []NoticeResponse
+	for rows.Next() {
+		var n NoticeResponse
+		var stJSON, trJSON, pdfJSON, datesJSONStr string
+		var isBus, isWorks int
+
+		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &datesJSONStr, &n.UpdatedAt); err == nil {
+			_ = json.Unmarshal([]byte(stJSON), &n.ParsedStations)
+			_ = json.Unmarshal([]byte(trJSON), &n.ParsedTrains)
+			_ = json.Unmarshal([]byte(pdfJSON), &n.PDFURLs)
+			_ = json.Unmarshal([]byte(datesJSONStr), &n.DatesJSON)
+			n.IsBusReplacement = isBus == 1
+			n.IsTrackWorks = isWorks == 1
+			notices = append(notices, n)
+		}
+	}
+	return notices
+}
+
+func isNoticeActiveOnDate(n NoticeResponse, dateStr string) bool {
+	if len(n.DatesJSON) > 0 {
+		for _, d := range n.DatesJSON {
+			if d == dateStr {
+				return true
+			}
+		}
+		return false
+	}
+	if n.DateFrom != "" && dateStr < n.DateFrom {
+		return false
+	}
+	if n.DateTo != "" && dateStr > n.DateTo {
+		return false
+	}
+	return true
+}
+
+func isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string, dateStr string) (matches bool, isBus bool, isWorks bool, noticeID string) {
+	if !isNoticeActiveOnDate(n, dateStr) {
+		return false, false, false, ""
+	}
+
+	// 1. If notice explicitly lists train numbers, match ONLY if this train's number is listed
+	if len(n.ParsedTrains) > 0 {
+		trMatched := false
+		for _, tr := range n.ParsedTrains {
+			if tr == trainNum {
+				trMatched = true
+				break
+			}
+		}
+		if !trMatched {
+			return false, false, false, ""
+		}
+		return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
+	}
+
+	// 2. Otherwise match based on affected station overlap
+	if len(n.ParsedStations) > 0 {
+		stMatched := false
+		for _, st := range n.ParsedStations {
+			for _, stName := range stationNames {
+				if stName != "" && strings.EqualFold(st, stName) {
+					stMatched = true
+					break
+				}
+			}
+			if stMatched {
+				break
+			}
+		}
+		if !stMatched {
+			return false, false, false, ""
+		}
+		return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
+	}
+
+	return false, false, false, ""
+}
+
 func (s *Server) GetStations(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT stop_id, stop_name, stop_lat, stop_lon
@@ -619,6 +750,10 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	allNotices := s.fetchNoticesFromDB()
+	var stationName string
+	_ = s.db.QueryRow("SELECT stop_name FROM stations WHERE stop_id = ?", stopID).Scan(&stationName)
+
 	entries := make([]StationTimetableEntry, 0)
 	for rows.Next() {
 		var entry StationTimetableEntry
@@ -634,6 +769,23 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 		err := s.db.QueryRow("SELECT delay_minutes FROM train_delays WHERE train_number = ? AND updated_at >= ?", entry.TrainNumber, cutoffStr).Scan(&delayMins)
 		if err == nil {
 			entry.DelayMinutes = &delayMins
+		}
+
+		todayStr := zgNow.Format("2006-01-02")
+		stNames := []string{stationName, entry.DestinationStationName}
+		for _, n := range allNotices {
+			matched, isBus, isWorks, noticeID := isNoticeApplicable(n, entry.TrainNumber, stNames, todayStr)
+			if matched {
+				if isBus {
+					entry.IsBusReplacement = true
+				}
+				if isWorks {
+					entry.IsTrackWorks = true
+				}
+				if entry.NoticeID == "" {
+					entry.NoticeID = noticeID
+				}
+			}
 		}
 
 		entries = append(entries, entry)
@@ -794,8 +946,26 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 		}
 	}
 
+	allNotices := s.fetchNoticesFromDB()
+	todayStr := zgNow.Format("2006-01-02")
+
 	activeTrains := make([]ActiveTrain, 0, len(activeTrainsMap))
 	for _, train := range activeTrainsMap {
+		stNames := []string{train.PrevStationName, train.NextStationName, train.FirstStationName, train.LastStationName}
+		for _, n := range allNotices {
+			matched, isBus, isWorks, noticeID := isNoticeApplicable(n, train.TrainNumber, stNames, todayStr)
+			if matched {
+				if isBus {
+					train.IsBusReplacement = true
+				}
+				if isWorks {
+					train.IsTrackWorks = true
+				}
+				if train.NoticeID == "" {
+					train.NoticeID = noticeID
+				}
+			}
+		}
 		activeTrains = append(activeTrains, train)
 	}
 
@@ -931,6 +1101,28 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 
 	details.DelayDistribution = s.computeDelayDistribution(trainNum)
 	details.RecentDelays = s.getRecentDelays(trainNum)
+
+	allNotices := s.fetchNoticesFromDB()
+	todayStr := zgNow.Format("2006-01-02")
+	stNames := []string{details.FirstStationName, details.LastStationName}
+
+	var trainNotices []NoticeResponse
+	for _, n := range allNotices {
+		matched, isBus, isWorks, noticeID := isNoticeApplicable(n, trainNum, stNames, todayStr)
+		if matched {
+			if isBus {
+				details.IsBusReplacement = true
+			}
+			if isWorks {
+				details.IsTrackWorks = true
+			}
+			if details.NoticeID == "" {
+				details.NoticeID = noticeID
+			}
+			trainNotices = append(trainNotices, n)
+		}
+	}
+	details.Notices = trainNotices
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(details)
@@ -1870,6 +2062,8 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 	args := append(toInterfaceSlice(fromIDs), toInterfaceSlice(toIDs)...)
 	args = append(args, calArgs...)
 
+	allNotices := s.fetchNoticesFromDB()
+
 	rows, err := s.db.Query(directQuery, args...)
 	results := make([]RoutePlanEntry, 0)
 	if err == nil {
@@ -1881,6 +2075,30 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 						entry.DelayMinutes = del
 					}
 				}
+
+				todayStr := zgNow.Format("2006-01-02")
+				stNames := []string{entry.OriginStationName, entry.DestinationStationName}
+				for _, n := range allNotices {
+					matched, isBus, isWorks, noticeID := isNoticeApplicable(n, entry.TrainNumber, stNames, todayStr)
+					if matched {
+						entry.AffectedByDisruption = true
+						if isBus {
+							entry.IsBusReplacement = true
+						}
+						if isWorks {
+							entry.IsTrackWorks = true
+						}
+						if entry.NoticeID == "" {
+							entry.NoticeID = noticeID
+						}
+						if entry.DisruptionNotice == "" {
+							entry.DisruptionNotice = n.Title
+						} else {
+							entry.DisruptionNotice += " | " + n.Title
+						}
+					}
+				}
+
 				results = append(results, entry)
 			}
 		}
