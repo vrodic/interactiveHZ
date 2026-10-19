@@ -49,7 +49,8 @@ var (
 
 var (
 	trainNumRegex  = regexp.MustCompile(`\b[1-9]\d{2,4}\b`)
-	pdfURLRegex    = regexp.MustCompile(`https?://www\.hzpp\.hr/api/v1/repository/download/[a-f0-9\-]+`)
+	pdfURLRegex    = regexp.MustCompile(`(?i)(?:https?://www\.hzpp\.hr)?/api/v1/repository/download/[a-f0-9\-]+`)
+	hrefPDFRegex   = regexp.MustCompile(`(?i)href=["']([^"']+\.pdf)["']`)
 	buttonTagRegex = regexp.MustCompile(`(?i)<button[^>]*>`)
 
 	croatianMonths = map[string]string{
@@ -214,7 +215,13 @@ func parseNoticesFromHTML(category string, html string, allStations []string, va
 			strings.Contains(titleLower, "korisnicki centar") ||
 			strings.Contains(titleLower, "prava putnika") ||
 			strings.Contains(titleLower, "pritužbe") ||
-			strings.Contains(titleLower, "povrat novca") {
+			strings.Contains(titleLower, "povrat novca") ||
+			strings.Contains(titleLower, "prihvati sve") ||
+			strings.Contains(titleLower, "prihvaćam") ||
+			strings.Contains(titleLower, "slažem se") ||
+			strings.Contains(titleLower, "kolačići") ||
+			strings.Contains(titleLower, "kolacici") ||
+			strings.Contains(titleLower, "cookie") {
 			continue
 		}
 
@@ -413,8 +420,30 @@ func parseDatesFromText(text string) ([]string, string, string) {
 }
 
 func extractPDFURLs(html string) []string {
+	var urls []string
 	matches := pdfURLRegex.FindAllString(html, -1)
-	return uniqueStrings(matches)
+	for _, m := range matches {
+		if !strings.HasPrefix(m, "http") {
+			m = "https://www.hzpp.hr" + m
+		}
+		urls = append(urls, m)
+	}
+
+	hrefMatches := hrefPDFRegex.FindAllStringSubmatch(html, -1)
+	for _, hm := range hrefMatches {
+		if len(hm) > 1 {
+			u := hm[1]
+			if !strings.HasPrefix(u, "http") {
+				if strings.HasPrefix(u, "/") {
+					u = "https://www.hzpp.hr" + u
+				} else {
+					u = "https://www.hzpp.hr/" + u
+				}
+			}
+			urls = append(urls, u)
+		}
+	}
+	return uniqueStrings(urls)
 }
 
 func extractTrainNumbers(text string) []string {

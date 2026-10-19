@@ -755,6 +755,75 @@ func TestAutoGenerateMissingArrivals(t *testing.T) {
 	}
 }
 
+func TestIsNoticeApplicable(t *testing.T) {
+	todayStr := time.Now().Format("2006-01-02")
+
+	// Notice 1: Track section notice with 14 stations (no explicit train numbers)
+	multiStationNotice := NoticeResponse{
+		ID:               "works-13-4e3dabce",
+		Category:         "works",
+		Title:            "Sisak Caprag - Sunja - Novska (1. - 31.10.)",
+		ParsedStations:   []string{"Blinjski Kut", "Brđani Krajiški", "Cerovljani", "Hrvatska Dubica", "Jasenovac", "Novska", "Papići", "Sisak", "Sisak Caprag", "Staza", "Sunja", "Višnjica", "Šaš", "Živaja"},
+		ParsedTrains:     nil,
+		IsBusReplacement: true,
+		IsTrackWorks:     true,
+	}
+
+	// Train 2104 stops: Novska, Kutina, Zagreb Glavni Kolodvor (only Novska matches)
+	tr2104Stops := []string{"Novska", "Stara Subocka", "Lipovljani", "Banova Jaruga", "Kutina", "Zagreb Glavni Kolodvor"}
+	matched, isBus, isWorks, noticeID := isNoticeApplicable(multiStationNotice, "2104", tr2104Stops, todayStr)
+	if matched {
+		t.Errorf("Expected Train 2104 NOT to be matched by Sisak Caprag - Sunja - Novska notice, but got matched = true (noticeID: %s, isBus: %v, isWorks: %v)", noticeID, isBus, isWorks)
+	}
+
+	// Train on affected line: Novska, Jasenovac, Sunja (3 stations match)
+	affectedTrainStops := []string{"Novska", "Jasenovac", "Hrvatska Dubica", "Sunja", "Sisak Caprag"}
+	matchedAff, isBusAff, isWorksAff, _ := isNoticeApplicable(multiStationNotice, "5201", affectedTrainStops, todayStr)
+	if !matchedAff || !isBusAff || !isWorksAff {
+		t.Errorf("Expected train 5201 to be matched by Sisak Caprag - Sunja - Novska notice, got matched=%v, isBus=%v, isWorks=%v", matchedAff, isBusAff, isWorksAff)
+	}
+
+	// Notice 2: Single station notice (1 station listed)
+	singleStationNotice := NoticeResponse{
+		ID:               "info-30-430ff405",
+		Category:         "info",
+		Title:            "Works at Vrata",
+		ParsedStations:   []string{"Vrata"},
+		ParsedTrains:     nil,
+		IsBusReplacement: false,
+		IsTrackWorks:     true,
+	}
+
+	singleMatchStops := []string{"Rijeka", "Vrata", "Delnice", "Zagreb Glavni Kolodvor"}
+	matchedSingle, _, _, _ := isNoticeApplicable(singleStationNotice, "4600", singleMatchStops, todayStr)
+	if !matchedSingle {
+		t.Errorf("Expected train stopping at Vrata to match 1-station notice, got false")
+	}
+
+	// Notice 3: Notice with explicit train numbers
+	explicitTrainNotice := NoticeResponse{
+		ID:               "info-1-27a94e0c",
+		Category:         "info",
+		Title:            "Delnice - Rijeka",
+		ParsedStations:   []string{"Delnice", "Ogulin", "Oštarije", "Rijeka"},
+		ParsedTrains:     []string{"4600", "4602"},
+		IsBusReplacement: true,
+		IsTrackWorks:     true,
+	}
+
+	// Train 4600 is listed
+	matchedTr, _, _, _ := isNoticeApplicable(explicitTrainNotice, "4600", []string{"Rijeka"}, todayStr)
+	if !matchedTr {
+		t.Errorf("Expected train 4600 to match explicit train notice")
+	}
+
+	// Train 4604 is NOT listed (even if station matches)
+	matchedOtherTr, _, _, _ := isNoticeApplicable(explicitTrainNotice, "4604", []string{"Delnice", "Rijeka"}, todayStr)
+	if matchedOtherTr {
+		t.Errorf("Expected train 4604 NOT to match explicit train notice listing 4600, 4602")
+	}
+}
+
 func BenchmarkGetSegments(b *testing.B) {
 	t := &testing.T{}
 	srv := setupTestDB(t)

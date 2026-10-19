@@ -614,6 +614,31 @@ func isNoticeActiveOnDate(n NoticeResponse, dateStr string) bool {
 	return true
 }
 
+func (s *Server) getTripStationNames(tripID string) []string {
+	if tripID == "" {
+		return nil
+	}
+	rows, err := s.db.Query(`
+		SELECT DISTINCT s.stop_name
+		FROM stop_times st
+		JOIN stations s ON st.stop_id = s.stop_id
+		WHERE st.trip_id = ?
+	`, tripID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 func isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string, dateStr string) (matches bool, isBus bool, isWorks bool, noticeID string) {
 	if !isNoticeActiveOnDate(n, dateStr) {
 		return false, false, false, ""
@@ -636,19 +661,22 @@ func isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string
 
 	// 2. Otherwise match based on affected station overlap
 	if len(n.ParsedStations) > 0 {
-		stMatched := false
+		matchedCount := 0
 		for _, st := range n.ParsedStations {
 			for _, stName := range stationNames {
 				if stName != "" && strings.EqualFold(st, stName) {
-					stMatched = true
+					matchedCount++
 					break
 				}
 			}
-			if stMatched {
-				break
-			}
 		}
-		if !stMatched {
+
+		required := 1
+		if len(n.ParsedStations) >= 2 {
+			required = 2
+		}
+
+		if matchedCount < required {
 			return false, false, false, ""
 		}
 		return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
@@ -780,7 +808,10 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 		}
 
 		todayStr := zgNow.Format("2006-01-02")
-		stNames := []string{stationName, entry.DestinationStationName}
+		stNames := s.getTripStationNames(entry.TripID)
+		if len(stNames) == 0 {
+			stNames = []string{stationName, entry.DestinationStationName}
+		}
 		for _, n := range allNotices {
 			matched, isBus, isWorks, noticeID := isNoticeApplicable(n, entry.TrainNumber, stNames, todayStr)
 			if matched {
@@ -971,7 +1002,10 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 
 	activeTrains := make([]ActiveTrain, 0, len(activeTrainsMap))
 	for _, train := range activeTrainsMap {
-		stNames := []string{train.PrevStationName, train.NextStationName, train.FirstStationName, train.LastStationName}
+		stNames := s.getTripStationNames(train.TripID)
+		if len(stNames) == 0 {
+			stNames = []string{train.PrevStationName, train.NextStationName, train.FirstStationName, train.LastStationName}
+		}
 		for _, n := range allNotices {
 			matched, isBus, isWorks, noticeID := isNoticeApplicable(n, train.TrainNumber, stNames, todayStr)
 			if matched {
@@ -1135,7 +1169,10 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 
 	allNotices := s.fetchNoticesFromDB()
 	todayStr := zgNow.Format("2006-01-02")
-	stNames := []string{details.FirstStationName, details.LastStationName}
+	stNames := s.getTripStationNames(details.TripID)
+	if len(stNames) == 0 {
+		stNames = []string{details.FirstStationName, details.LastStationName}
+	}
 
 	var trainNotices []NoticeResponse
 	for _, n := range allNotices {
@@ -2108,7 +2145,10 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 				}
 
 				todayStr := zgNow.Format("2006-01-02")
-				stNames := []string{entry.OriginStationName, entry.DestinationStationName}
+				stNames := s.getTripStationNames(entry.TripID)
+				if len(stNames) == 0 {
+					stNames = []string{entry.OriginStationName, entry.DestinationStationName}
+				}
 				for _, n := range allNotices {
 					matched, isBus, isWorks, noticeID := isNoticeApplicable(n, entry.TrainNumber, stNames, todayStr)
 					if matched {
