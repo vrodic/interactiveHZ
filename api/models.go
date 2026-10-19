@@ -95,14 +95,16 @@ type SearchResultItem struct {
 }
 
 type ActiveTrain struct {
-	TripID           string   `json:"trip_id"`
-	TrainNumber      string   `json:"train_number"`
-	Headsign         string   `json:"headsign"`
-	CurrentLat       float64  `json:"lat"`
-	CurrentLon       float64  `json:"lon"`
-	FirstStationName string   `json:"first_station_name"`
-	LastStationName  string   `json:"last_station_name"`
-	PrevStationID    string   `json:"prev_station_id"`
+	TripID             string   `json:"trip_id"`
+	TrainNumber        string   `json:"train_number"`
+	Headsign           string   `json:"headsign"`
+	CurrentLat         float64  `json:"lat"`
+	CurrentLon         float64  `json:"lon"`
+	FirstStationName   string   `json:"first_station_name"`
+	LastStationName    string   `json:"last_station_name"`
+	FirstDepartureTime string   `json:"first_departure_time,omitempty"`
+	LastArrivalTime    string   `json:"last_arrival_time,omitempty"`
+	PrevStationID      string   `json:"prev_station_id"`
 	PrevStationName  string   `json:"prev_station_name"`
 	NextStationID    string   `json:"next_station_id"`
 	NextStationName  string   `json:"next_station_name"`

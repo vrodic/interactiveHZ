@@ -201,7 +201,9 @@ function stripSeconds(timeStr) {
     if (!timeStr) return '';
     const parts = timeStr.split(':');
     if (parts.length >= 2) {
-        return `${parts[0]}:${parts[1]}`;
+        const h = parts[0].padStart(2, '0');
+        const m = parts[1].padStart(2, '0');
+        return `${h}:${m}`;
     }
     return timeStr;
 }
@@ -215,6 +217,61 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSegments();
     startUpdateLoop();
 });
+
+let startupRouteHandled = false;
+
+async function checkStartupRouteSelection() {
+    if (startupRouteHandled) return;
+    try {
+        const pairs = JSON.parse(localStorage.getItem('hz_recent_pairs') || '[]');
+        if (!pairs || pairs.length === 0) return;
+
+        const latest = pairs[0];
+        if (!latest.fromId || !latest.toId) return;
+
+        startupRouteHandled = true;
+
+        // Fill in Trip Planner inputs
+        const fromInput = document.getElementById('route-from-input');
+        const fromIdInput = document.getElementById('route-from-id');
+        const toInput = document.getElementById('route-to-input');
+        const toIdInput = document.getElementById('route-to-id');
+
+        if (fromInput) fromInput.value = latest.fromName || '';
+        if (fromIdInput) fromIdInput.value = latest.fromId || '';
+        if (toInput) toInput.value = latest.toName || '';
+        if (toIdInput) toIdInput.value = latest.toId || '';
+
+        // Fetch route plan
+        const resp = await fetch(`/api/routes/plan?from=${encodeURIComponent(latest.fromId)}&to=${encodeURIComponent(latest.toId)}&time=${Math.floor(currentTimeSec)}`);
+        if (!resp.ok) return;
+        const routes = await resp.json();
+        if (!routes || routes.length === 0) return;
+
+        // Find the train that will first come to the starting station
+        let targetRoute = routes.find(r => r.is_nearest_future) || routes[0];
+        const trNum = targetRoute.train_number ? targetRoute.train_number.split(' ')[0] : null;
+
+        if (!trNum) return;
+
+        // Check if train is currently active
+        const activeTr = activeTrainsData.find(t => t.train_number === trNum || t.trip_id === trNum);
+
+        if (activeTr && activeTr.lat && activeTr.lon) {
+            map.setView([activeTr.lat, activeTr.lon], 12);
+            openTrainDetails(activeTr);
+        } else {
+            // Find origin station location
+            const originSt = stationsData.find(st => st.stop_id === latest.fromId || removeDiacritics(st.stop_name) === removeDiacritics(latest.fromName));
+            if (originSt && originSt.lat && originSt.lon) {
+                map.setView([originSt.lat, originSt.lon], 12);
+            }
+            openTrainDetails({ train_number: trNum });
+        }
+    } catch (e) {
+        console.error('Failed to handle startup route selection:', e);
+    }
+}
 
 let hideSpeedMarkers = false;
 
@@ -1851,6 +1908,9 @@ async function fetchActiveTrains() {
         activeTrainsData = data;
         updateTrainMarkers();
         updateOpenTrainDetailsIfActive();
+        if (!startupRouteHandled) {
+            checkStartupRouteSelection();
+        }
     } catch (e) {
         console.error('Failed to fetch active trains:', e);
     }
@@ -1956,14 +2016,17 @@ async function fetchAndDisplayTrainDetails(trainNum) {
         if (titleEl) titleEl.textContent = `🚆 Train ${data.train_number}`;
         if (badgeEl) badgeEl.innerHTML = delayBadge + disruptionBadgeHTML;
 
+        const firstTimeStr = data.first_departure_time ? ` (${stripSeconds(data.first_departure_time)})` : '';
+        const lastTimeStr = data.last_arrival_time ? ` (${stripSeconds(data.last_arrival_time)})` : '';
+
         content.innerHTML = `
             <div class="detail-row">
                 <div class="detail-label">First Station (Origin)</div>
-                <div class="detail-value">🚩 ${escapeHTML(data.first_station_name)}</div>
+                <div class="detail-value">🚩 ${escapeHTML(data.first_station_name)}${firstTimeStr}</div>
             </div>
             <div class="detail-row">
                 <div class="detail-label">Last Station (Destination)</div>
-                <div class="detail-value">🏁 ${escapeHTML(data.last_station_name)}</div>
+                <div class="detail-value">🏁 ${escapeHTML(data.last_station_name)}${lastTimeStr}</div>
             </div>
             <div class="detail-row">
                 <div class="detail-label">Scheduled Journey Time</div>
@@ -2253,6 +2316,8 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
 
     const originStation = escapeHTML(train.first_station_name || 'Origin Station');
     const destStation = escapeHTML(train.last_station_name || 'Destination Station');
+    const firstTimeStr = train.first_departure_time ? ` (${stripSeconds(train.first_departure_time)})` : '';
+    const lastTimeStr = train.last_arrival_time ? ` (${stripSeconds(train.last_arrival_time)})` : '';
 
     let liveResultHTML = '';
     const existingResultDiv = document.getElementById('live-delay-result');
@@ -2267,11 +2332,11 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
     content.innerHTML = `
         <div class="detail-row">
             <div class="detail-label">First Station (Origin)</div>
-            <div class="detail-value">🚩 ${originStation}</div>
+            <div class="detail-value">🚩 ${originStation}${firstTimeStr}</div>
         </div>
         <div class="detail-row">
             <div class="detail-label">Last Station (Destination)</div>
-            <div class="detail-value">🏁 ${destStation}</div>
+            <div class="detail-value">🏁 ${destStation}${lastTimeStr}</div>
         </div>
         <div class="detail-row">
             <div class="detail-label">Current Segment</div>
