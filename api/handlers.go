@@ -285,7 +285,15 @@ func toInterfaceSlice(strs []string) []interface{} {
 func stripSeconds(timeStr string) string {
 	parts := strings.Split(timeStr, ":")
 	if len(parts) >= 2 {
-		return parts[0] + ":" + parts[1]
+		h := parts[0]
+		if len(h) == 1 {
+			h = "0" + h
+		}
+		m := parts[1]
+		if len(m) == 1 {
+			m = "0" + m
+		}
+		return h + ":" + m
 	}
 	return timeStr
 }
@@ -923,24 +931,36 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 					lastSt = headsign
 				}
 
+				var fDepTime, lArrTime string
+				_ = s.db.QueryRow(`
+					SELECT st_first.departure_time, st_last.arrival_time
+					FROM stop_times st_first
+					JOIN stop_times st_last ON st_last.trip_id = st_first.trip_id AND st_last.stop_sequence = (
+						SELECT MAX(stop_sequence) FROM stop_times WHERE trip_id = st_first.trip_id
+					)
+					WHERE st_first.trip_id = ? AND st_first.stop_sequence = 1
+				`, tripID).Scan(&fDepTime, &lArrTime)
+
 				activeTrainsMap[trainNum] = ActiveTrain{
-					TripID:           tripID,
-					TrainNumber:      trainNum,
-					Headsign:         headsign,
-					CurrentLat:       curLat,
-					CurrentLon:       curLon,
-					PrevStationID:    s1ID,
-					PrevStationName:  s1.StopName,
-					NextStationID:    s2ID,
-					NextStationName:  s2.StopName,
-					FirstStationName: firstSt,
-					LastStationName:  lastSt,
-					SegmentID:        s1ID + "->" + s2ID,
-					Progress:         progress,
-					Status:           status,
-					DelayMinutes:     delayMinutes,
-					ScheduledDepSec:  s1DepSec,
-					ScheduledArrSec:  s2ArrSec,
+					TripID:             tripID,
+					TrainNumber:        trainNum,
+					Headsign:           headsign,
+					CurrentLat:         curLat,
+					CurrentLon:         curLon,
+					PrevStationID:      s1ID,
+					PrevStationName:    s1.StopName,
+					NextStationID:      s2ID,
+					NextStationName:    s2.StopName,
+					FirstStationName:   firstSt,
+					LastStationName:    lastSt,
+					FirstDepartureTime: fDepTime,
+					LastArrivalTime:    lArrTime,
+					SegmentID:          s1ID + "->" + s2ID,
+					Progress:           progress,
+					Status:             status,
+					DelayMinutes:       delayMinutes,
+					ScheduledDepSec:    s1DepSec,
+					ScheduledArrSec:    s2ArrSec,
 				}
 			}
 		}
@@ -982,6 +1002,17 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 	if trainNum == "" {
 		http.Error(w, "train_number parameter is required", http.StatusBadRequest)
 		return
+	}
+
+	// Fetch live delay if delay hasn't been updated in the last 30 seconds
+	shouldFetch := true
+	if val, ok := s.lastQueried.Load(trainNum); ok {
+		if lastTime, ok := val.(time.Time); ok && time.Since(lastTime) < 30*time.Second {
+			shouldFetch = false
+		}
+	}
+	if shouldFetch {
+		_, _ = s.FetchAndSaveTrainDelay(trainNum)
 	}
 
 	zgNow := getZagrebTime()
