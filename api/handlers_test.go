@@ -923,6 +923,41 @@ func TestVrbovecDugoSeloIvanicGradNotice(t *testing.T) {
 	}
 }
 
+func TestTrain2010ExpressAndLocalNoticeApplicability(t *testing.T) {
+	srv := setupTestDB(t)
+
+	notice := NoticeResponse{
+		ID:               "works-vrbovec-ds-ivanic",
+		Category:         "works",
+		Title:            "Posebna regulacija prometa na relaciji Vrbovec - Dugo Selo - Ivanić-Grad od 23. do 25. listopada 2026.",
+		Content:          "Između kolodvora Vrbovec, Dugo Selo i Sesvete promet će teći jednim kolosijekom, a između kolodvora Dugo Selo i Ivanić-Grad pruga će biti zatvorena za promet.",
+		ParsedStations:   []string{"Vrbovec", "Dugo Selo", "Ivanić-Grad", "Sesvete"},
+		IsBusReplacement: true,
+		IsTrackWorks:     true,
+		DateFrom:         "2026-10-23",
+		DateTo:           "2026-10-25",
+	}
+
+	testDate := "2026-10-24"
+
+	// Train 2010 (stops at Zagreb GK, Dugo Selo, Ivanić-Grad, Novska, Vinkovci)
+	train2010Stops := []string{"Zagreb Glavni Kolodvor", "Dugo Selo", "Ivanić-Grad", "Popovača", "Kutina", "Novska", "Vinkovci"}
+	matched, isBus, isWorks, noticeID := srv.isNoticeApplicable(notice, "2010", train2010Stops, testDate)
+
+	if !matched {
+		t.Errorf("Expected Train 2010 to match notice, got false")
+	}
+	if !isBus {
+		t.Errorf("Expected Train 2010 to be marked as bus replacement (isBus = true)")
+	}
+	if !isWorks {
+		t.Errorf("Expected Train 2010 to be marked as track works (isWorks = true)")
+	}
+	if noticeID != "works-vrbovec-ds-ivanic" {
+		t.Errorf("Expected noticeID 'works-vrbovec-ds-ivanic', got '%s'", noticeID)
+	}
+}
+
 func BenchmarkGetSegments(b *testing.B) {
 	t := &testing.T{}
 	srv := setupTestDB(t)

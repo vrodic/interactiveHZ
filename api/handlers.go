@@ -683,28 +683,38 @@ func (s *Server) getIntermediateStations(stationA, stationB string) []string {
 		return []string{stationA, stationB}
 	}
 
-	// 1. Find stop_ids for stationA and stationB using indexes
+	// 1. Find stop_ids for stationA and stationB using in-memory station map / matchStationNames
 	var stopIDsA, stopIDsB []string
-	rowsA, errA := s.db.Query("SELECT stop_id FROM stations WHERE LOWER(stop_name) = LOWER(?) OR LOWER(REPLACE(stop_name, '-', ' ')) = LOWER(?)", stationA, normA)
-	if errA == nil {
-		for rowsA.Next() {
-			var id string
-			if err := rowsA.Scan(&id); err == nil {
-				stopIDsA = append(stopIDsA, id)
+	if s != nil {
+		s.ensureStationsLoaded()
+		s.stationsMap.Range(func(key, value interface{}) bool {
+			st := value.(Station)
+			if matchStationNames(st.StopName, stationA) {
+				stopIDsA = append(stopIDsA, st.StopID)
 			}
-		}
-		rowsA.Close()
+			if matchStationNames(st.StopName, stationB) {
+				stopIDsB = append(stopIDsB, st.StopID)
+			}
+			return true
+		})
 	}
 
-	rowsB, errB := s.db.Query("SELECT stop_id FROM stations WHERE LOWER(stop_name) = LOWER(?) OR LOWER(REPLACE(stop_name, '-', ' ')) = LOWER(?)", stationB, normB)
-	if errB == nil {
-		for rowsB.Next() {
-			var id string
-			if err := rowsB.Scan(&id); err == nil {
-				stopIDsB = append(stopIDsB, id)
+	if (len(stopIDsA) == 0 || len(stopIDsB) == 0) && s != nil && s.db != nil {
+		rowsA, errA := s.db.Query("SELECT stop_id, stop_name FROM stations")
+		if errA == nil {
+			for rowsA.Next() {
+				var id, name string
+				if err := rowsA.Scan(&id, &name); err == nil {
+					if matchStationNames(name, stationA) {
+						stopIDsA = append(stopIDsA, id)
+					}
+					if matchStationNames(name, stationB) {
+						stopIDsB = append(stopIDsB, id)
+					}
+				}
 			}
+			rowsA.Close()
 		}
-		rowsB.Close()
 	}
 
 	if len(stopIDsA) == 0 || len(stopIDsB) == 0 {
