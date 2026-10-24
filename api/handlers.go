@@ -683,42 +683,96 @@ func (s *Server) getIntermediateStations(stationA, stationB string) []string {
 		return []string{stationA, stationB}
 	}
 
-	query := `
+	// 1. Find stop_ids for stationA and stationB using indexes
+	var stopIDsA, stopIDsB []string
+	rowsA, errA := s.db.Query("SELECT stop_id FROM stations WHERE LOWER(stop_name) = LOWER(?) OR LOWER(REPLACE(stop_name, '-', ' ')) = LOWER(?)", stationA, normA)
+	if errA == nil {
+		for rowsA.Next() {
+			var id string
+			if err := rowsA.Scan(&id); err == nil {
+				stopIDsA = append(stopIDsA, id)
+			}
+		}
+		rowsA.Close()
+	}
+
+	rowsB, errB := s.db.Query("SELECT stop_id FROM stations WHERE LOWER(stop_name) = LOWER(?) OR LOWER(REPLACE(stop_name, '-', ' ')) = LOWER(?)", stationB, normB)
+	if errB == nil {
+		for rowsB.Next() {
+			var id string
+			if err := rowsB.Scan(&id); err == nil {
+				stopIDsB = append(stopIDsB, id)
+			}
+		}
+		rowsB.Close()
+	}
+
+	if len(stopIDsA) == 0 || len(stopIDsB) == 0 {
+		return []string{stationA, stationB}
+	}
+
+	// 2. Query stop_times with indexed stop_id lookups
+	tripMapA := make(map[string]int)
+	placeholdersA := makePlaceholders(len(stopIDsA))
+	argsA := toInterfaceSlice(stopIDsA)
+	rowsTripsA, errTripsA := s.db.Query("SELECT trip_id, stop_sequence FROM stop_times WHERE stop_id IN ("+placeholdersA+")", argsA...)
+	if errTripsA == nil {
+		for rowsTripsA.Next() {
+			var tid string
+			var seq int
+			if err := rowsTripsA.Scan(&tid, &seq); err == nil {
+				tripMapA[tid] = seq
+			}
+		}
+		rowsTripsA.Close()
+	}
+
+	var targetTripID string
+	var minSeq, maxSeq int
+	placeholdersB := makePlaceholders(len(stopIDsB))
+	argsB := toInterfaceSlice(stopIDsB)
+	rowsTripsB, errTripsB := s.db.Query("SELECT trip_id, stop_sequence FROM stop_times WHERE stop_id IN ("+placeholdersB+")", argsB...)
+	if errTripsB == nil {
+		for rowsTripsB.Next() {
+			var tid string
+			var seqB int
+			if err := rowsTripsB.Scan(&tid, &seqB); err == nil {
+				if seqA, found := tripMapA[tid]; found {
+					targetTripID = tid
+					if seqA < seqB {
+						minSeq, maxSeq = seqA, seqB
+					} else {
+						minSeq, maxSeq = seqB, seqA
+					}
+					break
+				}
+			}
+		}
+		rowsTripsB.Close()
+	}
+
+	if targetTripID == "" {
+		return []string{stationA, stationB}
+	}
+
+	// 3. Retrieve intermediate stop names using indexed trip_id + stop_sequence
+	rowsStops, errStops := s.db.Query(`
 		SELECT DISTINCT s.stop_name
 		FROM stop_times st
 		JOIN stations s ON st.stop_id = s.stop_id
-		JOIN (
-			SELECT st1.trip_id,
-			       MIN(st1.stop_sequence, st2.stop_sequence) as min_seq,
-			       MAX(st1.stop_sequence, st2.stop_sequence) as max_seq
-			FROM stop_times st1
-			JOIN stations s1 ON st1.stop_id = s1.stop_id
-			JOIN stop_times st2 ON st1.trip_id = st2.trip_id
-			JOIN stations s2 ON st2.stop_id = s2.stop_id
-			WHERE (LOWER(s1.stop_name) = LOWER(?) OR LOWER(REPLACE(s1.stop_name, '-', ' ')) = LOWER(REPLACE(?, '-', ' ')))
-			  AND (LOWER(s2.stop_name) = LOWER(?) OR LOWER(REPLACE(s2.stop_name, '-', ' ')) = LOWER(REPLACE(?, '-', ' ')))
-			GROUP BY st1.trip_id
-		) trip_bounds ON st.trip_id = trip_bounds.trip_id
-		WHERE st.stop_sequence >= trip_bounds.min_seq
-		  AND st.stop_sequence <= trip_bounds.max_seq
-	`
-
-	rows, err := s.db.Query(query, stationA, stationA, stationB, stationB)
-	if err != nil {
-		if s != nil {
-			cacheKey := "inter_st:" + normA + "||" + normB
-			s.routeCache.Store(cacheKey, []string{stationA, stationB})
-		}
-		return []string{stationA, stationB}
-	}
-	defer rows.Close()
+		WHERE st.trip_id = ? AND st.stop_sequence >= ? AND st.stop_sequence <= ?
+		ORDER BY st.stop_sequence ASC
+	`, targetTripID, minSeq, maxSeq)
 
 	var stations []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err == nil {
-			stations = append(stations, name)
+	if errStops == nil {
+		for rowsStops.Next() {
+			var name string
+			if err := rowsStops.Scan(&name); err == nil {
+				stations = append(stations, name)
+			}
 		}
+		rowsStops.Close()
 	}
 
 	if len(stations) == 0 {
