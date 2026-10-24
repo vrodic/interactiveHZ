@@ -481,6 +481,7 @@ func extractStations(text string, allStations []string) []string {
 
 	var found []string
 	lowerText := strings.ToLower(cleanedText)
+	lowerTextNormalized := strings.ReplaceAll(lowerText, "-", " ")
 
 	for _, st := range allStations {
 		stClean := strings.TrimSpace(st)
@@ -488,8 +489,9 @@ func extractStations(text string, allStations []string) []string {
 			continue
 		}
 		stLower := strings.ToLower(stClean)
+		stNormalized := strings.ReplaceAll(stLower, "-", " ")
 
-		if strings.Contains(lowerText, stLower) {
+		if strings.Contains(lowerText, stLower) || strings.Contains(lowerTextNormalized, stNormalized) {
 			found = append(found, stClean)
 		}
 	}

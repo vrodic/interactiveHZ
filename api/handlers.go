@@ -639,7 +639,190 @@ func (s *Server) getTripStationNames(tripID string) []string {
 	return names
 }
 
+func normalizeStationName(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, "č", "c")
+	s = strings.ReplaceAll(s, "ć", "c")
+	s = strings.ReplaceAll(s, "đ", "d")
+	s = strings.ReplaceAll(s, "š", "s")
+	s = strings.ReplaceAll(s, "ž", "z")
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func matchStationNames(st1, st2 string) bool {
+	if st1 == "" || st2 == "" {
+		return false
+	}
+	if strings.EqualFold(st1, st2) {
+		return true
+	}
+	s1 := normalizeStationName(st1)
+	s2 := normalizeStationName(st2)
+	return s1 == s2 && s1 != ""
+}
+
+func (s *Server) getIntermediateStations(stationA, stationB string) []string {
+	if stationA == "" || stationB == "" {
+		return nil
+	}
+	normA := normalizeStationName(stationA)
+	normB := normalizeStationName(stationB)
+	if normA == "" || normB == "" || normA == normB {
+		return []string{stationA}
+	}
+
+	if s != nil {
+		cacheKey := "inter_st:" + normA + "||" + normB
+		if val, ok := s.routeCache.Load(cacheKey); ok {
+			return val.([]string)
+		}
+	}
+
+	if s == nil || s.db == nil {
+		return []string{stationA, stationB}
+	}
+
+	query := `
+		SELECT DISTINCT s.stop_name
+		FROM stop_times st
+		JOIN stations s ON st.stop_id = s.stop_id
+		JOIN (
+			SELECT st1.trip_id,
+			       MIN(st1.stop_sequence, st2.stop_sequence) as min_seq,
+			       MAX(st1.stop_sequence, st2.stop_sequence) as max_seq
+			FROM stop_times st1
+			JOIN stations s1 ON st1.stop_id = s1.stop_id
+			JOIN stop_times st2 ON st1.trip_id = st2.trip_id
+			JOIN stations s2 ON st2.stop_id = s2.stop_id
+			WHERE (LOWER(s1.stop_name) = LOWER(?) OR LOWER(REPLACE(s1.stop_name, '-', ' ')) = LOWER(REPLACE(?, '-', ' ')))
+			  AND (LOWER(s2.stop_name) = LOWER(?) OR LOWER(REPLACE(s2.stop_name, '-', ' ')) = LOWER(REPLACE(?, '-', ' ')))
+			GROUP BY st1.trip_id
+		) trip_bounds ON st.trip_id = trip_bounds.trip_id
+		WHERE st.stop_sequence >= trip_bounds.min_seq
+		  AND st.stop_sequence <= trip_bounds.max_seq
+	`
+
+	rows, err := s.db.Query(query, stationA, stationA, stationB, stationB)
+	if err != nil {
+		if s != nil {
+			cacheKey := "inter_st:" + normA + "||" + normB
+			s.routeCache.Store(cacheKey, []string{stationA, stationB})
+		}
+		return []string{stationA, stationB}
+	}
+	defer rows.Close()
+
+	var stations []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			stations = append(stations, name)
+		}
+	}
+
+	if len(stations) == 0 {
+		stations = []string{stationA, stationB}
+	}
+
+	if s != nil {
+		cacheKey := "inter_st:" + normA + "||" + normB
+		s.routeCache.Store(cacheKey, stations)
+	}
+	return stations
+}
+
+func (s *Server) getNoticeExpandedStations(n NoticeResponse) (fullSet []string, busSet []string) {
+	if len(n.ParsedStations) == 0 {
+		return nil, nil
+	}
+
+	if s != nil {
+		cacheKey := "notice_exp:" + n.ID
+		if val, ok := s.routeCache.Load(cacheKey); ok {
+			pair := val.([2][]string)
+			return pair[0], pair[1]
+		}
+	}
+
+	fullMap := make(map[string]bool)
+	for _, st := range n.ParsedStations {
+		fullMap[st] = true
+	}
+
+	for i := 0; i < len(n.ParsedStations); i++ {
+		for j := i + 1; j < len(n.ParsedStations); j++ {
+			stA := n.ParsedStations[i]
+			stB := n.ParsedStations[j]
+			intermediates := s.getIntermediateStations(stA, stB)
+			for _, inter := range intermediates {
+				fullMap[inter] = true
+			}
+		}
+	}
+
+	fullSet = make([]string, 0, len(fullMap))
+	for st := range fullMap {
+		fullSet = append(fullSet, st)
+	}
+
+	if n.IsBusReplacement {
+		busMap := make(map[string]bool)
+		text := strings.ToLower(n.Title + " \n " + n.Content)
+
+		// Split text into clauses/sentences to match stations with local closure keywords
+		clauses := strings.FieldsFunc(text, func(r rune) bool {
+			return r == '.' || r == ',' || r == ';' || r == '\n' || r == '\r'
+		})
+
+		var busPairs [][2]string
+		for _, clause := range clauses {
+			normClause := normalizeStationName(clause)
+			if strings.Contains(clause, "zatvoren") || strings.Contains(clause, "autobus") || strings.Contains(clause, "zamjensk") || strings.Contains(clause, " bus") {
+				for i := 0; i < len(n.ParsedStations); i++ {
+					for j := i + 1; j < len(n.ParsedStations); j++ {
+						stA := n.ParsedStations[i]
+						stB := n.ParsedStations[j]
+						normA := normalizeStationName(stA)
+						normB := normalizeStationName(stB)
+
+						if strings.Contains(normClause, normA) && strings.Contains(normClause, normB) {
+							busPairs = append(busPairs, [2]string{stA, stB})
+						}
+					}
+				}
+			}
+		}
+
+		if len(busPairs) > 0 {
+			for _, pair := range busPairs {
+				intermediates := s.getIntermediateStations(pair[0], pair[1])
+				for _, inter := range intermediates {
+					busMap[inter] = true
+				}
+			}
+			busSet = make([]string, 0, len(busMap))
+			for st := range busMap {
+				busSet = append(busSet, st)
+			}
+		} else {
+			busSet = fullSet
+		}
+	}
+
+	if s != nil {
+		cacheKey := "notice_exp:" + n.ID
+		s.routeCache.Store(cacheKey, [2][]string{fullSet, busSet})
+	}
+	return fullSet, busSet
+}
+
 func isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string, dateStr string) (matches bool, isBus bool, isWorks bool, noticeID string) {
+	var s *Server
+	return s.isNoticeApplicable(n, trainNum, stationNames, dateStr)
+}
+
+func (s *Server) isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string, dateStr string) (matches bool, isBus bool, isWorks bool, noticeID string) {
 	if !isNoticeActiveOnDate(n, dateStr) {
 		return false, false, false, ""
 	}
@@ -661,25 +844,49 @@ func isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string
 
 	// 2. Otherwise match based on affected station overlap
 	if len(n.ParsedStations) > 0 {
+		fullSet, busSet := s.getNoticeExpandedStations(n)
+
 		matchedCount := 0
-		for _, st := range n.ParsedStations {
+		for _, st := range fullSet {
 			for _, stName := range stationNames {
-				if stName != "" && strings.EqualFold(st, stName) {
+				if matchStationNames(st, stName) {
 					matchedCount++
 					break
 				}
 			}
 		}
 
-		required := 1
-		if len(n.ParsedStations) >= 2 {
-			required = 2
+		required := 2
+		if len(n.ParsedStations) == 1 {
+			required = 1
 		}
 
 		if matchedCount < required {
 			return false, false, false, ""
 		}
-		return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
+
+		isBus = false
+		if n.IsBusReplacement && len(busSet) > 0 {
+			busMatchedCount := 0
+			for _, st := range busSet {
+				for _, stName := range stationNames {
+					if matchStationNames(st, stName) {
+						busMatchedCount++
+						break
+					}
+				}
+			}
+			busRequired := 2
+			if len(busSet) == 1 {
+				busRequired = 1
+			}
+			if busMatchedCount >= busRequired {
+				isBus = true
+			}
+		}
+
+		isWorks = n.IsTrackWorks
+		return true, isBus, isWorks, n.ID
 	}
 
 	return false, false, false, ""
@@ -813,7 +1020,7 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 			stNames = []string{stationName, entry.DestinationStationName}
 		}
 		for _, n := range allNotices {
-			matched, isBus, isWorks, noticeID := isNoticeApplicable(n, entry.TrainNumber, stNames, todayStr)
+			matched, isBus, isWorks, noticeID := s.isNoticeApplicable(n, entry.TrainNumber, stNames, todayStr)
 			if matched {
 				if isBus {
 					entry.IsBusReplacement = true
@@ -1007,7 +1214,7 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 			stNames = []string{train.PrevStationName, train.NextStationName, train.FirstStationName, train.LastStationName}
 		}
 		for _, n := range allNotices {
-			matched, isBus, isWorks, noticeID := isNoticeApplicable(n, train.TrainNumber, stNames, todayStr)
+			matched, isBus, isWorks, noticeID := s.isNoticeApplicable(n, train.TrainNumber, stNames, todayStr)
 			if matched {
 				if isBus {
 					train.IsBusReplacement = true
@@ -1176,7 +1383,7 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 
 	var trainNotices []NoticeResponse
 	for _, n := range allNotices {
-		matched, isBus, isWorks, noticeID := isNoticeApplicable(n, trainNum, stNames, todayStr)
+		matched, isBus, isWorks, noticeID := s.isNoticeApplicable(n, trainNum, stNames, todayStr)
 		if matched {
 			if isBus {
 				details.IsBusReplacement = true
@@ -2150,7 +2357,7 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 					stNames = []string{entry.OriginStationName, entry.DestinationStationName}
 				}
 				for _, n := range allNotices {
-					matched, isBus, isWorks, noticeID := isNoticeApplicable(n, entry.TrainNumber, stNames, todayStr)
+					matched, isBus, isWorks, noticeID := s.isNoticeApplicable(n, entry.TrainNumber, stNames, todayStr)
 					if matched {
 						entry.AffectedByDisruption = true
 						if isBus {
