@@ -42,6 +42,7 @@ func setupTestDB(t *testing.T) *Server {
 
 	_ = db.PopulateRouteSegments(database)
 	srv := NewServer(database)
+	srv.lastQueried.Store("2010", time.Now())
 	srv.InvalidateSegmentsCache()
 	return srv
 }
@@ -821,6 +822,104 @@ func TestIsNoticeApplicable(t *testing.T) {
 	matchedOtherTr, _, _, _ := isNoticeApplicable(explicitTrainNotice, "4604", []string{"Delnice", "Rijeka"}, todayStr)
 	if matchedOtherTr {
 		t.Errorf("Expected train 4604 NOT to match explicit train notice listing 4600, 4602")
+	}
+}
+
+func TestVrbovecDugoSeloIvanicGradNotice(t *testing.T) {
+	srv := setupTestDB(t)
+
+	// Populate stations & GTFS trips for section expansion testing
+	_, err := srv.db.Exec(`
+		INSERT INTO stations (stop_id, stop_name, stop_lat, stop_lon)
+		VALUES ('s_ses', 'Sesvete', 45.826, 16.113),
+		       ('s_skr', 'Sesvetski Kraljevec', 45.820, 16.170),
+		       ('s_ds', 'Dugo Selo', 45.811, 16.239),
+		       ('s_ost', 'Ostrna', 45.789, 16.280),
+		       ('s_iv', 'Ivanić-Grad', 45.711, 16.395),
+		       ('s_boz', 'Božjakovina', 45.830, 16.300),
+		       ('s_vrb', 'Vrbovec', 45.885, 16.423);
+
+		INSERT INTO trips (trip_id, route_id, service_id, trip_short_name)
+		VALUES ('t_suburban', 'r1', 'serv1', '2201'),
+		       ('t_ivanic', 'r1', 'serv1', '2012'),
+		       ('t_vrbovec', 'r1', 'serv1', '2014');
+
+		INSERT INTO stop_times (trip_id, arrival_time, departure_time, arrival_seconds, departure_seconds, stop_id, stop_sequence)
+		VALUES ('t_suburban', '08:00:00', '08:00:00', 28800, 28800, 's1', 1),
+		       ('t_suburban', '08:15:00', '08:15:00', 29700, 29700, 's_ses', 2),
+		       ('t_suburban', '08:20:00', '08:20:00', 30000, 30000, 's_skr', 3),
+		       ('t_suburban', '08:25:00', '08:25:00', 30300, 30300, 's_ds', 4),
+
+		       ('t_ivanic', '09:00:00', '09:00:00', 32400, 32400, 's_ds', 1),
+		       ('t_ivanic', '09:10:00', '09:10:00', 33000, 33000, 's_ost', 2),
+		       ('t_ivanic', '09:25:00', '09:25:00', 33900, 33900, 's_iv', 3),
+
+		       ('t_vrbovec', '10:00:00', '10:00:00', 36000, 36000, 's_ds', 1),
+		       ('t_vrbovec', '10:10:00', '10:10:00', 36600, 36600, 's_boz', 2),
+		       ('t_vrbovec', '10:25:00', '10:25:00', 37500, 37500, 's_vrb', 3);
+	`)
+	if err != nil {
+		t.Fatalf("Failed to seed test trips for section notice: %v", err)
+	}
+
+	notice := NoticeResponse{
+		ID:               "works-vrbovec-ds-ivanic",
+		Category:         "works",
+		Title:            "Posebna regulacija prometa na relaciji Vrbovec - Dugo Selo - Ivanić-Grad od 23. do 25. listopada 2026.",
+		Content:          "Između kolodvora Vrbovec, Dugo Selo i Sesvete promet će teći jednim kolosijekom, a između kolodvora Dugo Selo i Ivanić-Grad pruga će biti zatvorena za promet.",
+		ParsedStations:   []string{"Vrbovec", "Dugo Selo", "Ivanić-Grad", "Sesvete"},
+		IsBusReplacement: true,
+		IsTrackWorks:     true,
+		DateFrom:         "2026-10-23",
+		DateTo:           "2026-10-25",
+	}
+
+	testDate := "2026-10-24"
+
+	// 1. Suburban train: Zagreb GK -> Sesvete -> Sesvetski Kraljevec -> Dugo Selo
+	suburbanStops := []string{"Zagreb Glavni Kolodvor", "Sesvete", "Sesvetski Kraljevec", "Dugo Selo"}
+	matchedSub, isBusSub, isWorksSub, _ := srv.isNoticeApplicable(notice, "2201", suburbanStops, testDate)
+	if !matchedSub {
+		t.Errorf("Expected suburban train Zagreb-Dugo Selo to match notice")
+	}
+	if isBusSub {
+		t.Errorf("Expected suburban train Zagreb-Dugo Selo NOT to be marked as bus replacement")
+	}
+	if !isWorksSub {
+		t.Errorf("Expected suburban train Zagreb-Dugo Selo to be marked as track works")
+	}
+
+	// 2. Train on closed section: Dugo Selo -> Ostrna -> Ivanić-Grad
+	ivanicStops := []string{"Dugo Selo", "Ostrna", "Ivanić-Grad"}
+	matchedIv, isBusIv, isWorksIv, _ := srv.isNoticeApplicable(notice, "2012", ivanicStops, testDate)
+	if !matchedIv {
+		t.Errorf("Expected train Dugo Selo-Ivanić Grad to match notice")
+	}
+	if !isBusIv {
+		t.Errorf("Expected train Dugo Selo-Ivanić Grad to be marked as bus replacement")
+	}
+	if !isWorksIv {
+		t.Errorf("Expected train Dugo Selo-Ivanić Grad to be marked as track works")
+	}
+
+	// 3. Train on single-track works section: Dugo Selo -> Božjakovina -> Vrbovec
+	vrbovecStops := []string{"Dugo Selo", "Božjakovina", "Vrbovec"}
+	matchedVrb, isBusVrb, isWorksVrb, _ := srv.isNoticeApplicable(notice, "2014", vrbovecStops, testDate)
+	if !matchedVrb {
+		t.Errorf("Expected train Dugo Selo-Vrbovec to match notice")
+	}
+	if isBusVrb {
+		t.Errorf("Expected train Dugo Selo-Vrbovec NOT to be marked as bus replacement")
+	}
+	if !isWorksVrb {
+		t.Errorf("Expected train Dugo Selo-Vrbovec to be marked as track works")
+	}
+
+	// 4. Unrelated train: Zagreb GK -> Karlovac
+	otherStops := []string{"Zagreb Glavni Kolodvor", "Remetinec", "Karlovac"}
+	matchedOther, _, _, _ := srv.isNoticeApplicable(notice, "4001", otherStops, testDate)
+	if matchedOther {
+		t.Errorf("Expected unrelated train Zagreb-Karlovac NOT to match notice")
 	}
 }
 
