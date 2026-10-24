@@ -639,6 +639,55 @@ func (s *Server) getTripStationNames(tripID string) []string {
 	return names
 }
 
+func uniqueStrings(slice []string) []string {
+	m := make(map[string]bool)
+	var res []string
+	for _, s := range slice {
+		if s != "" && !m[s] {
+			m[s] = true
+			res = append(res, s)
+		}
+	}
+	return res
+}
+
+func (s *Server) getTrainStationNames(trainNum, tripID string) []string {
+	cacheKey := "train_st_names:" + trainNum + ":" + tripID
+	if val, ok := s.routeCache.Load(cacheKey); ok {
+		return val.([]string)
+	}
+
+	var names []string
+
+	if tripID != "" {
+		tripSts := s.getTripStationNames(tripID)
+		names = append(names, tripSts...)
+	}
+
+	if trainNum != "" {
+		rows, err := s.db.Query(`
+			SELECT DISTINCT s.stop_name
+			FROM stop_times st
+			JOIN stations s ON st.stop_id = s.stop_id
+			JOIN trips t ON st.trip_id = t.trip_id
+			WHERE (t.trip_short_name = ? OR t.trip_id = ?)
+		`, trainNum, trainNum)
+		if err == nil {
+			for rows.Next() {
+				var name string
+				if err := rows.Scan(&name); err == nil {
+					names = append(names, name)
+				}
+			}
+			rows.Close()
+		}
+	}
+
+	names = uniqueStrings(names)
+	s.routeCache.Store(cacheKey, names)
+	return names
+}
+
 func normalizeStationName(s string) string {
 	s = strings.ToLower(s)
 	s = strings.ReplaceAll(s, "-", " ")
@@ -1079,7 +1128,7 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 		}
 
 		todayStr := zgNow.Format("2006-01-02")
-		stNames := s.getTripStationNames(entry.TripID)
+		stNames := s.getTrainStationNames(entry.TrainNumber, entry.TripID)
 		if len(stNames) == 0 {
 			stNames = []string{stationName, entry.DestinationStationName}
 		}
@@ -1273,7 +1322,7 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 
 	activeTrains := make([]ActiveTrain, 0, len(activeTrainsMap))
 	for _, train := range activeTrainsMap {
-		stNames := s.getTripStationNames(train.TripID)
+		stNames := s.getTrainStationNames(train.TrainNumber, train.TripID)
 		if len(stNames) == 0 {
 			stNames = []string{train.PrevStationName, train.NextStationName, train.FirstStationName, train.LastStationName}
 		}
@@ -1440,7 +1489,7 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 
 	allNotices := s.fetchNoticesFromDB()
 	todayStr := zgNow.Format("2006-01-02")
-	stNames := s.getTripStationNames(details.TripID)
+	stNames := s.getTrainStationNames(trainNum, details.TripID)
 	if len(stNames) == 0 {
 		stNames = []string{details.FirstStationName, details.LastStationName}
 	}
@@ -2416,7 +2465,7 @@ func (s *Server) PlanRoute(w http.ResponseWriter, r *http.Request) {
 				}
 
 				todayStr := zgNow.Format("2006-01-02")
-				stNames := s.getTripStationNames(entry.TripID)
+				stNames := s.getTrainStationNames(entry.TrainNumber, entry.TripID)
 				if len(stNames) == 0 {
 					stNames = []string{entry.OriginStationName, entry.DestinationStationName}
 				}

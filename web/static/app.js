@@ -1535,7 +1535,7 @@ async function findRoutePlans() {
             rowsHTML += `
                 <tr style="${rowStyle}" class="${rowClass}">
                     <td style="padding: 10px;">🕒 ${depTimeHM} ➔ ${arrTimeHM} <span style="color: #a0aec0; font-size: 11px;">(${r.duration_minutes} min)</span></td>
-                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">Train ${escapeHTML(r.train_number)}</a> ${disruptionBadgesHTML}${badgeStr}${transferBadge}${disruptionNoticeHTML}</td>
+                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">${escapeHTML(r.train_number)}</a> ${disruptionBadgesHTML}${badgeStr}${transferBadge}${disruptionNoticeHTML}</td>
                     <td style="padding: 10px;">${delayStr}</td>
                 </tr>
             `;
@@ -1854,7 +1854,7 @@ async function openStationTimetable(station) {
 
                 timetableHTML += `<tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="timetable-row" data-train="${escapeHTML(e.train_number)}">
                     <td style="padding: 6px 4px;">🕒 ${depHM}</td>
-                    <td style="padding: 6px 4px;"><strong>Train ${escapeHTML(e.train_number)}</strong> ${badgesHTML}</td>
+                    <td style="padding: 6px 4px;"><a href="#" class="train-link" data-train="${escapeHTML(e.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">${escapeHTML(e.train_number)}</a> ${badgesHTML}</td>
                     <td style="padding: 6px 4px; color: #e2e8f0; font-weight: 500;">🏁 ${escapeHTML(dest)}</td>
                     <td style="padding: 6px 4px;">${delayStr}</td>
                 </tr>`;
@@ -1878,6 +1878,15 @@ async function openStationTimetable(station) {
                             evt.stopPropagation();
                             const noticeId = badge.getAttribute('data-notice-id');
                             openNoticesModal(noticeId);
+                        });
+                    });
+
+                    popupNode.querySelectorAll('.train-link').forEach(link => {
+                        link.addEventListener('click', (evt) => {
+                            evt.preventDefault();
+                            evt.stopPropagation();
+                            const trNum = link.getAttribute('data-train');
+                            openTrainDetails({ train_number: trNum });
                         });
                     });
 
