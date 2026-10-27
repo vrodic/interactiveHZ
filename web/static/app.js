@@ -9,6 +9,10 @@ let segmentPathsMap = {};
 let segmentPathLengthsMap = {};
 let segmentsLayerGroup = L.layerGroup();
 let segmentBadgesLayerGroup = L.layerGroup();
+// Canvas keeps ~1200 segment polylines in one element instead of one SVG path each.
+let segmentsCanvasRenderer = L.canvas({ padding: 0.5, tolerance: 4 });
+// All badge markers; only those inside the viewport are added to segmentBadgesLayerGroup.
+let segmentBadgeMarkers = [];
 let currentOpenedTrainNum = null;
 let selectedTrainNum = null;
 let selectedTrainRouteLayer = null;
@@ -315,6 +319,7 @@ function initMap() {
     segmentBadgesLayerGroup.addTo(map);
 
     map.on('zoomend', updateSegmentVisibility);
+    map.on('moveend overlayadd', updateVisibleSegmentBadges);
     map.on('popupclose', () => {
         clearSelectedStationHighlight();
     });
@@ -331,7 +336,20 @@ function updateSegmentVisibility() {
     } else {
         if (!map.hasLayer(segmentsLayerGroup)) map.addLayer(segmentsLayerGroup);
         if (!map.hasLayer(segmentBadgesLayerGroup)) map.addLayer(segmentBadgesLayerGroup);
+        updateVisibleSegmentBadges();
     }
+}
+
+// Leaflet keeps every marker in the DOM even when off-screen, so only badges near the viewport are added.
+function updateVisibleSegmentBadges() {
+    if (!map.hasLayer(segmentBadgesLayerGroup)) return;
+    const bounds = map.getBounds().pad(0.25);
+    segmentBadgeMarkers.forEach(marker => {
+        const visible = bounds.contains(marker.getLatLng());
+        const shown = segmentBadgesLayerGroup.hasLayer(marker);
+        if (visible && !shown) segmentBadgesLayerGroup.addLayer(marker);
+        else if (!visible && shown) segmentBadgesLayerGroup.removeLayer(marker);
+    });
 }
 
 function initControls() {
@@ -494,6 +512,10 @@ function initControls() {
         if (!searchInput.contains(e.target) && !searchResults.contains(e.target)) {
             searchResults.style.display = 'none';
         }
+    });
+
+    document.getElementById('locate-train-btn').addEventListener('click', () => {
+        locateTrainOnMap(currentOpenedTrainNum);
     });
 
     document.getElementById('close-panel').addEventListener('click', () => {
@@ -1183,7 +1205,7 @@ function openActiveTrainsModal() {
 
             rowsHTML += `
                 <tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="active-train-row" data-train="${escapeHTML(tr.train_number)}">
-                    <td style="padding: 10px;"><strong>Train ${escapeHTML(tr.train_number)}</strong></td>
+                    <td style="padding: 10px;"><strong>${escapeHTML(tr.train_number)}</strong></td>
                     <td style="padding: 10px;">🚩 ${escapeHTML(tr.first_station_name || 'N/A')}</td>
                     <td style="padding: 10px;">🏁 ${escapeHTML(tr.last_station_name || 'N/A')}</td>
                     <td style="padding: 10px;">${escapeHTML(tr.prev_station_name)} ➔ ${escapeHTML(tr.next_station_name)} (${Math.round(tr.progress * 100)}%)</td>
@@ -1248,7 +1270,7 @@ async function openDashboardModal() {
             uniqueDelayed.forEach(tr => {
                 delayedRows += `
                     <tr style="border-bottom: 1px solid #2a313d;">
-                        <td style="padding: 8px;"><strong>Train ${escapeHTML(tr.train_number)}</strong></td>
+                        <td style="padding: 8px;"><strong>${escapeHTML(tr.train_number)}</strong></td>
                         <td style="padding: 8px;">${escapeHTML(tr.first_station_name)} ➔ ${escapeHTML(tr.last_station_name)}</td>
                         <td style="padding: 8px; color: #ef4444; font-weight: bold;">+${tr.delay_minutes} min</td>
                     </tr>
@@ -1535,7 +1557,7 @@ async function findRoutePlans() {
             rowsHTML += `
                 <tr style="${rowStyle}" class="${rowClass}">
                     <td style="padding: 10px;">🕒 ${depTimeHM} ➔ ${arrTimeHM} <span style="color: #a0aec0; font-size: 11px;">(${r.duration_minutes} min)</span></td>
-                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">Train ${escapeHTML(r.train_number)}</a> ${disruptionBadgesHTML}${badgeStr}${transferBadge}${disruptionNoticeHTML}</td>
+                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">${escapeHTML(r.train_number)}</a> ${disruptionBadgesHTML}${badgeStr}${transferBadge}${disruptionNoticeHTML}</td>
                     <td style="padding: 10px;">${delayStr}</td>
                 </tr>
             `;
@@ -1697,6 +1719,7 @@ function renderStations() {
 function renderSegments() {
     segmentsLayerGroup.clearLayers();
     segmentBadgesLayerGroup.clearLayers();
+    segmentBadgeMarkers = [];
 
     segmentsData.forEach(seg => {
         const key = seg.id || `${seg.from_stop_id}->${seg.to_stop_id}`;
@@ -1720,7 +1743,8 @@ function renderSegments() {
             color: lineColor,
             weight: lineWeight,
             opacity: lineOpacity,
-            dashArray: hasSegmentDisruption ? '8, 6' : null
+            dashArray: hasSegmentDisruption ? '8, 6' : null,
+            renderer: segmentsCanvasRenderer
         });
         segmentsLayerGroup.addLayer(line);
 
@@ -1735,7 +1759,7 @@ function renderSegments() {
         });
 
         const labelMarker = L.marker([midLat, midLon], { icon: speedLabelIcon });
-        segmentBadgesLayerGroup.addLayer(labelMarker);
+        segmentBadgeMarkers.push(labelMarker);
 
         const clickHandler = () => {
             openSegmentDetails(seg);
@@ -1775,7 +1799,7 @@ async function openSegmentDetails(seg) {
                 const arrTime = formatSecondsToTime(tr.scheduled_arr_sec);
                 trainRowsHTML += `
                     <tr style="border-bottom: 1px solid #2a313d;">
-                        <td style="padding: 6px 4px;"><strong>Train ${escapeHTML(tr.train_number)}</strong></td>
+                        <td style="padding: 6px 4px;"><strong>${escapeHTML(tr.train_number)}</strong></td>
                         <td style="padding: 6px 4px;">${depTime} - ${arrTime}</td>
                         <td style="padding: 6px 4px; color: #10b981; font-weight: bold;">${Math.round(tr.speed_kmh)} km/h</td>
                     </tr>
@@ -1816,6 +1840,51 @@ async function openSegmentDetails(seg) {
     }
 }
 
+function gtfsTimeToSeconds(timeStr) {
+    if (!timeStr) return null;
+    const parts = timeStr.split(':').map(Number);
+    if (parts.length < 2 || parts.some(isNaN)) return null;
+    return parts[0] * 3600 + parts[1] * 60 + (parts[2] || 0);
+}
+
+// Index of the next train due at the station (expected departure incl. delay, allowing
+// trains that left up to 2 minutes ago); falls back to the most recent one.
+function findNearestTimetableEntryIndex(entries, nowSec) {
+    let bestIdx = -1;
+    let bestDiff = Infinity;
+    let latestIdx = -1;
+    let latestDiff = -Infinity;
+    entries.forEach((e, idx) => {
+        const depSec = gtfsTimeToSeconds(e.departure_time || e.arrival_time);
+        if (depSec === null) return;
+        const delaySec = (typeof e.delay_minutes === 'number' ? e.delay_minutes : 0) * 60;
+        // Signed difference wrapped into [-12h, 12h) so times past midnight (e.g. 24:15) compare correctly.
+        const diff = ((depSec + delaySec - nowSec) % 86400 + 86400 + 43200) % 86400 - 43200;
+        if (diff >= -120 && diff < bestDiff) {
+            bestDiff = diff;
+            bestIdx = idx;
+        }
+        if (diff > latestDiff) {
+            latestDiff = diff;
+            latestIdx = idx;
+        }
+    });
+    return bestIdx >= 0 ? bestIdx : latestIdx;
+}
+
+function scrollTimetableToNearestRow(popupNode) {
+    const container = popupNode.querySelector('.timetable-popup-container');
+    const row = popupNode.querySelector('.timetable-nearest-row');
+    if (!container || !row) return;
+    const header = container.querySelector('thead');
+    const headerHeight = header ? header.offsetHeight : 0;
+    const rowTop = row.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+    // Keep the previous train visible above the highlighted one.
+    const prevRow = row.previousElementSibling;
+    const prevHeight = prevRow ? prevRow.offsetHeight : 0;
+    container.scrollTop = Math.max(0, rowTop - headerHeight - prevHeight);
+}
+
 async function openStationTimetable(station) {
     highlightSelectedStation(station);
     try {
@@ -1835,10 +1904,12 @@ async function openStationTimetable(station) {
                 </thead>
                 <tbody>`;
 
+        const nearestIdx = findNearestTimetableEntryIndex(entries, currentTimeSec);
+
         if (entries.length === 0) {
             timetableHTML += `<tr><td colspan="4" style="padding: 8px; text-align: center; color: #a0aec0;">No scheduled trains found.</td></tr>`;
         } else {
-            entries.forEach(e => {
+            entries.forEach((e, idx) => {
                 const delayVal = typeof e.delay_minutes === 'number' ? e.delay_minutes : 0;
                 const delayStr = delayVal > 0 ? `<span style="color: #ef4444;">+${delayVal}m</span>` : `<span style="color: #10b981;">On Time</span>`;
                 const dest = e.destination_station_name || e.headsign || 'N/A';
@@ -1852,9 +1923,10 @@ async function openStationTimetable(station) {
                     badgesHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(e.notice_id || '')}" style="font-size: 9px; padding: 1px 4px;">🚧 Works</span>`;
                 }
 
-                timetableHTML += `<tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="timetable-row" data-train="${escapeHTML(e.train_number)}">
+                const rowClass = idx === nearestIdx ? 'timetable-row timetable-nearest-row' : 'timetable-row';
+                timetableHTML += `<tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="${rowClass}" data-train="${escapeHTML(e.train_number)}">
                     <td style="padding: 6px 4px;">🕒 ${depHM}</td>
-                    <td style="padding: 6px 4px;"><strong>Train ${escapeHTML(e.train_number)}</strong> ${badgesHTML}</td>
+                    <td style="padding: 6px 4px;"><strong>${escapeHTML(e.train_number)}</strong> ${badgesHTML}</td>
                     <td style="padding: 6px 4px; color: #e2e8f0; font-weight: 500;">🏁 ${escapeHTML(dest)}</td>
                     <td style="padding: 6px 4px;">${delayStr}</td>
                 </tr>`;
@@ -1868,31 +1940,27 @@ async function openStationTimetable(station) {
             .setContent(timetableHTML)
             .openOn(map);
 
-        const onPopupOpen = (e) => {
-            if (e.popup === popup) {
-                map.off('popupopen', onPopupOpen);
-                const popupNode = popup.getElement();
-                if (popupNode) {
-                    popupNode.querySelectorAll('.clickable-notice-badge').forEach(badge => {
-                        badge.addEventListener('click', (evt) => {
-                            evt.stopPropagation();
-                            const noticeId = badge.getAttribute('data-notice-id');
-                            openNoticesModal(noticeId);
-                        });
-                    });
+        // openOn() adds the popup synchronously, so its DOM is ready here.
+        const popupNode = popup.getElement();
+        if (popupNode) {
+            popupNode.querySelectorAll('.clickable-notice-badge').forEach(badge => {
+                badge.addEventListener('click', (evt) => {
+                    evt.stopPropagation();
+                    const noticeId = badge.getAttribute('data-notice-id');
+                    openNoticesModal(noticeId);
+                });
+            });
 
-                    popupNode.querySelectorAll('.timetable-row').forEach(row => {
-                        row.addEventListener('click', (evt) => {
-                            if (evt.target.classList.contains('clickable-notice-badge')) return;
-                            const trNum = row.getAttribute('data-train');
-                            openTrainDetails({ train_number: trNum });
-                        });
-                    });
-                }
-            }
-        };
+            popupNode.querySelectorAll('.timetable-row').forEach(row => {
+                row.addEventListener('click', (evt) => {
+                    if (evt.target.classList.contains('clickable-notice-badge')) return;
+                    const trNum = row.getAttribute('data-train');
+                    openTrainDetails({ train_number: trNum });
+                });
+            });
 
-        map.on('popupopen', onPopupOpen);
+            scrollTimetableToNearestRow(popupNode);
+        }
 
     } catch (err) {
         console.error('Failed to load station timetable:', err);
@@ -1921,6 +1989,33 @@ function updateOpenTrainDetailsIfActive() {
     const train = activeTrainsData.find(t => t.train_number === currentOpenedTrainNum || t.trip_id === currentOpenedTrainNum);
     if (train) {
         updateTrainDetailsPanel(train, false);
+    }
+}
+
+function showLocateTrainButton() {
+    const btn = document.getElementById('locate-train-btn');
+    if (btn) btn.style.display = 'inline-flex';
+}
+
+function locateTrainOnMap(trNum) {
+    if (!trNum) return;
+    const train = activeTrainsData.find(t => t.train_number === trNum || t.trip_id === trNum);
+    const marker = train && trainMarkersMap[train.trip_id];
+    if (!marker) {
+        showToast(`🚆 Train ${trNum}`, 'This train is not running on the map right now.');
+        return;
+    }
+
+    selectedTrainNum = trNum;
+    updateTrainMarkersClientSide();
+    map.setView(marker.getLatLng(), Math.max(map.getZoom(), 12));
+
+    const el = marker.getElement();
+    if (el) {
+        el.classList.remove('locate-flash');
+        void el.offsetWidth; // restart the animation on repeated clicks
+        el.classList.add('locate-flash');
+        setTimeout(() => el.classList.remove('locate-flash'), 2000);
     }
 }
 
@@ -1959,6 +2054,7 @@ async function fetchAndDisplayTrainDetails(trainNum) {
 
     if (titleEl) titleEl.textContent = `🚆 Train ${trainNum}`;
     if (badgeEl) badgeEl.innerHTML = '';
+    showLocateTrainButton();
 
     panel.style.display = 'block';
     content.innerHTML = `<p style="color: #a0aec0; text-align: center; padding: 20px;">Loading details for Train ${escapeHTML(trainNum)}...</p>`;
@@ -2312,6 +2408,7 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
         : `<span class="badge badge-on-time">Active on Route</span>`;
 
     if (titleEl) titleEl.textContent = `🚆 Train ${train.train_number}`;
+    showLocateTrainButton();
         if (badgeEl) badgeEl.innerHTML = delayBadge + activeDisruptionsHTML;
 
     const originStation = escapeHTML(train.first_station_name || 'Origin Station');

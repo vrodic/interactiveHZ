@@ -940,7 +940,7 @@ func (s *Server) GetStationTimetable(w http.ResponseWriter, r *http.Request) {
 		WHERE st.stop_id = ? AND %s
 		GROUP BY train_num, st.departure_time, st.arrival_time
 		ORDER BY st.departure_seconds ASC
-		LIMIT 200
+		LIMIT 500
 	`, calCond)
 
 	args := append([]interface{}{stopID}, calArgs...)
