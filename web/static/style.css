@@ -842,8 +842,15 @@ body, html {
         margin-left: 8px;
     }
 
+    /* Mobile browsers auto-zoom on focus for form fields under 16px, pushing the header off-screen. */
+    .search-input,
+    input,
+    select,
+    textarea {
+        font-size: 16px !important;
+    }
+
     .search-input {
-        font-size: 13px;
         padding: 6px 10px;
     }
 
