@@ -193,6 +193,12 @@ func fetchPage(client *http.Client, pageURL string) (string, error) {
 
 var accordionContainerRegex = regexp.MustCompile(`(?i)id="accordion[^"]*"`)
 
+// footerRegex marks the start of the site footer, which otherwise ends up in the last notice.
+var footerRegex = regexp.MustCompile(`(?i)<!--\s*Footer|<footer[\s>]`)
+
+// embeddedJSONBlockRegex matches the hidden {{ ... }} station/date data block in a notice.
+var embeddedJSONBlockRegex = regexp.MustCompile(`(?s)\{\{.*?\}\}`)
+
 func parseNoticesFromHTML(category string, html string, allStations []string, validTrainNums map[string]bool) []NoticeItem {
 	var items []NoticeItem
 
@@ -201,6 +207,9 @@ func parseNoticesFromHTML(category string, html string, allStations []string, va
 	if loc := accordionContainerRegex.FindStringIndex(html); loc != nil {
 		htmlContent = html[loc[0]:]
 	}
+	if loc := footerRegex.FindStringIndex(htmlContent); loc != nil {
+		htmlContent = htmlContent[:loc[0]]
+	}
 
 	sections := buttonTagRegex.Split(htmlContent, -1)
 	if len(sections) <= 1 {
@@ -208,7 +217,8 @@ func parseNoticesFromHTML(category string, html string, allStations []string, va
 	}
 
 	for idx, sec := range sections {
-		cleanText := stripHTMLTags(sec)
+		// The embedded JSON block is machine data (parsed below), not notice text.
+		cleanText := stripHTMLTags(embeddedJSONBlockRegex.ReplaceAllString(sec, ""))
 		cleanText = strings.ReplaceAll(cleanText, "&nbsp;", " ")
 		cleanText = strings.TrimSpace(cleanText)
 
@@ -804,7 +814,8 @@ func extractEmbeddedJSONData(sec string) ([]string, string, string) {
 	endIdx := strings.Index(sec, "}}")
 
 	if startIdx != -1 && endIdx > startIdx {
-		jsonStr := sec[startIdx+2 : endIdx]
+		// "{{ ... }}" wraps the object body in doubled braces; keep one pair so it is a JSON object.
+		jsonStr := sec[startIdx+1 : endIdx+1]
 		jsonStr = stripHTMLTags(jsonStr)
 		jsonStr = strings.ReplaceAll(jsonStr, "&nbsp;", " ")
 		jsonStr = strings.TrimSpace(jsonStr)

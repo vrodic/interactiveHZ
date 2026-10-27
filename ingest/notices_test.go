@@ -163,6 +163,29 @@ func findNotice(t *testing.T, items []NoticeItem, titlePrefix string) NoticeItem
 	return NoticeItem{}
 }
 
+func TestLiveFixtureContentExcludesEmbeddedJSONAndFooter(t *testing.T) {
+	items := parseLiveFixture(t, "works")
+	for _, n := range items {
+		for _, noise := range []string{"stationsHR", "{{", "}}", "HŽ Putnički prijevoz društvo", "kolačić"} {
+			if strings.Contains(n.Content, noise) {
+				t.Errorf("%s: content contains %q", n.Title, noise)
+			}
+		}
+	}
+
+	// The embedded block must still feed station matching.
+	n := findNotice(t, items, "Banova Jaruga - Daruvar - Virovitica")
+	for _, st := range []string{"Pakrac", "Suhopolje"} {
+		if !contains(n.ParsedStations, st) {
+			t.Errorf("expected embedded station %s in %v", st, n.ParsedStations)
+		}
+	}
+	// "(do 12.12.)" is open-ended: active from now until 12 December, not the embedded block's range.
+	if n.DateFrom != "" || n.DateTo != "2026-12-12" || len(n.DatesJSON) != 0 {
+		t.Errorf("dates: from=%q to=%q list=%v, want open-ended until 2026-12-12", n.DateFrom, n.DateTo, n.DatesJSON)
+	}
+}
+
 func TestLiveFixtureTrains(t *testing.T) {
 	items := parseLiveFixture(t, "works")
 	expected := map[string][]string{

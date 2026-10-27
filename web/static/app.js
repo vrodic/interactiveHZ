@@ -1190,7 +1190,9 @@ function renderNoticesModalBody() {
         if (item.dates_json && item.dates_json.length > 0) {
             datesHTML = `<div style="font-size: 11px; color: #00e5ff; margin-bottom: 6px;">📅 Dates: ${item.dates_json.map(d => escapeHTML(d)).join(', ')}</div>`;
         } else if (item.date_from || item.date_to) {
-            datesHTML = `<div style="font-size: 11px; color: #00e5ff; margin-bottom: 6px;">📅 Date: ${escapeHTML(item.date_from)} ${item.date_to ? '➔ ' + escapeHTML(item.date_to) : ''}</div>`;
+            // An open-ended notice ("do 12.12.") has no start date: it applies from now until date_to.
+            const fromLabel = item.date_from ? escapeHTML(item.date_from) : 'now';
+            datesHTML = `<div style="font-size: 11px; color: #00e5ff; margin-bottom: 6px;">📅 Date: ${fromLabel} ${item.date_to ? '➔ ' + escapeHTML(item.date_to) : ''}</div>`;
         }
 
         let pdfHTML = '';
