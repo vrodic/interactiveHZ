@@ -27,7 +27,6 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-
 	if _, err := database.Exec("PRAGMA busy_timeout = 5000;"); err != nil {
 		log.Printf("Warning: failed to set busy timeout: %v", err)
 	}
@@ -148,7 +147,9 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		date_from TEXT,
 		date_to TEXT,
 		dates_json TEXT,
-		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		section_stations TEXT,
+		line_stations TEXT
 	);
 	`
 
@@ -156,8 +157,9 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
 
-
 	_, _ = database.Exec("ALTER TABLE traffic_notices ADD COLUMN dates_json TEXT;")
+	_, _ = database.Exec("ALTER TABLE traffic_notices ADD COLUMN section_stations TEXT;")
+	_, _ = database.Exec("ALTER TABLE traffic_notices ADD COLUMN line_stations TEXT;")
 
 	_, _ = database.Exec("DROP INDEX IF EXISTS idx_stop_times_trip_id;")
 

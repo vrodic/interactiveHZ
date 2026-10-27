@@ -42,6 +42,7 @@ func setupTestDB(t *testing.T) *Server {
 
 	_ = db.PopulateRouteSegments(database)
 	srv := NewServer(database)
+	srv.lastQueried.Store("2010", time.Now())
 	srv.InvalidateSegmentsCache()
 	return srv
 }
@@ -821,6 +822,141 @@ func TestIsNoticeApplicable(t *testing.T) {
 	matchedOtherTr, _, _, _ := isNoticeApplicable(explicitTrainNotice, "4604", []string{"Delnice", "Rijeka"}, todayStr)
 	if matchedOtherTr {
 		t.Errorf("Expected train 4604 NOT to match explicit train notice listing 4600, 4602")
+	}
+
+	// Notice 4: train numbers in the text plus a linked PDF train list that is not parsed,
+	// so unlisted trains on the affected section still match by station
+	pdfTrainNotice := NoticeResponse{
+		ID:               "works-4-pdf",
+		Category:         "works",
+		Title:            "Karlovac - Duga Resa - Ogulin",
+		ParsedStations:   []string{"Duga Resa", "Ogulin", "Oštarije", "Karlovac"},
+		ParsedTrains:     []string{"5102"},
+		PDFURLs:          []string{"https://www.hzpp.hr/api/v1/repository/download/x"},
+		IsBusReplacement: true,
+	}
+	if m, _, _, _ := isNoticeApplicable(pdfTrainNotice, "5102", []string{"Rijeka"}, todayStr); !m {
+		t.Errorf("Expected listed train 5102 to match notice with PDF list")
+	}
+	if m, _, _, _ := isNoticeApplicable(pdfTrainNotice, "701", []string{"Ogulin", "Oštarije", "Duga Resa", "Karlovac"}, todayStr); !m {
+		t.Errorf("Expected unlisted train 701 through Ogulin - Duga Resa to match notice with PDF list")
+	}
+	if m, _, _, _ := isNoticeApplicable(pdfTrainNotice, "480", []string{"Rijeka", "Šapjane"}, todayStr); m {
+		t.Errorf("Expected train 480 (Rijeka - Šapjane) NOT to match Karlovac - Ogulin notice")
+	}
+
+	// Notice 5: open-ended notice ("do 12. prosinca") is active until its last day
+	openEndedNotice := NoticeResponse{
+		ID:               "works-32-open",
+		Category:         "works",
+		Title:            "Banova Jaruga - Daruvar - Virovitica (do 12.12.)",
+		ParsedStations:   []string{"Banova Jaruga", "Daruvar", "Virovitica"},
+		DateTo:           "2026-12-12",
+		IsBusReplacement: true,
+	}
+	stops := []string{"Banova Jaruga", "Lipik", "Daruvar"}
+	if m, _, _, _ := isNoticeApplicable(openEndedNotice, "2800", stops, "2026-10-27"); !m {
+		t.Errorf("Expected open-ended notice to be active before its end date")
+	}
+	if m, _, _, _ := isNoticeApplicable(openEndedNotice, "2800", stops, "2026-12-13"); m {
+		t.Errorf("Expected open-ended notice to be inactive after its end date")
+	}
+}
+
+func TestSectionNoticeMatching(t *testing.T) {
+	todayStr := time.Now().Format("2006-01-02")
+
+	// Stop patterns modelled on the GTFS routes around the live notices of 2026-10-27
+	karlovacOgulin := []string{"Karlovac", "Karlovac Centar", "Mrzlo Polje", "Duga Resa", "Belavići", "Zvečaj", "Oštarije", "Ogulin"}
+	zagrebKarlovac := []string{"Zagreb Glavni kolodvor", "Jastrebarsko", "Karlovac"}
+	zagrebDugaResa := []string{"Zagreb Glavni kolodvor", "Karlovac", "Karlovac Centar", "Duga Resa"}
+	icZagrebSplit := []string{"Zagreb Glavni kolodvor", "Karlovac", "Ogulin", "Gospić", "Split"} // non-stop through Duga Resa - Oštarije
+	ogulinRijeka := []string{"Ogulin", "Moravice", "Rijeka"}
+	patterns := [][]string{karlovacOgulin, zagrebKarlovac, zagrebDugaResa, icZagrebSplit, ogulinRijeka}
+
+	// "Karlovac - Duga Resa - Ogulin (19. - 30.10.)": closed "između kolodvora Duga Resa i Oštarije"
+	notice := NoticeResponse{
+		ID:               "works-1-e27e6adc",
+		Title:            "Karlovac - Duga Resa - Ogulin (19. - 30.10.)",
+		ParsedStations:   []string{"Duga Resa", "Karlovac", "Karlovac Centar", "Mrzlo Polje", "Ogulin", "Oštarije"},
+		PDFURLs:          []string{"https://www.hzpp.hr/api/v1/repository/download/x"},
+		SectionStations:  [][]string{{"Duga Resa", "Oštarije"}},
+		IsBusReplacement: true,
+	}
+	notice.sectionPairs = sectionCoverPairs(notice.SectionStations, notice.LineStations, patterns)
+
+	cases := []struct {
+		name  string
+		stops []string
+		want  bool
+	}{
+		{"Karlovac - Ogulin local", karlovacOgulin, true},
+		{"IC Zagreb - Split not stopping in the section", icZagrebSplit, true},
+		{"Zagreb - Karlovac", zagrebKarlovac, false},
+		// Shares 3 notice stations, which the plain station-overlap rule used to match
+		{"Zagreb - Duga Resa, ending at the section", zagrebDugaResa, false},
+		{"Ogulin - Rijeka, beyond the section", ogulinRijeka, false},
+	}
+	for _, c := range cases {
+		if m, _, _, _ := isNoticeApplicable(notice, "1", c.stops, todayStr); m != c.want {
+			t.Errorf("%s: matched = %v, want %v", c.name, m, c.want)
+		}
+	}
+
+	// "Banova Jaruga - Daruvar - Virovitica (do 12.12.)": the section runs to Virovitica, but
+	// only "pruga Banova Jaruga – Pčelić" is closed; Pčelić - Virovitica is the open Osijek line
+	daruvarLine := []string{"Banova Jaruga", "Lipik", "Daruvar", "Đulovac", "Pčelić", "Suhopolje", "Virovitica"}
+	osijekLine := []string{"Osijek", "Našice", "Slatina", "Pčelić", "Suhopolje", "Virovitica", "Koprivnica"}
+	daruvarPatterns := [][]string{daruvarLine, osijekLine}
+	section := [][]string{{"Banova Jaruga", "Daruvar", "Virovitica"}}
+
+	daruvarNotice := NoticeResponse{
+		ID:               "works-32-564aa1ae",
+		Title:            "Banova Jaruga - Daruvar - Virovitica (do 12.12.)",
+		SectionStations:  section,
+		LineStations:     []string{"Banova Jaruga", "Pčelić"},
+		DateTo:           "2099-12-31",
+		IsBusReplacement: true,
+	}
+	daruvarNotice.sectionPairs = sectionCoverPairs(daruvarNotice.SectionStations, daruvarNotice.LineStations, daruvarPatterns)
+	if m, _, _, _ := isNoticeApplicable(daruvarNotice, "1", daruvarLine, todayStr); !m {
+		t.Errorf("Expected Banova Jaruga - Virovitica train to match")
+	}
+	if m, _, _, _ := isNoticeApplicable(daruvarNotice, "1", osijekLine, todayStr); m {
+		t.Errorf("Expected Osijek - Koprivnica train via Pčelić - Virovitica NOT to match closed line Banova Jaruga - Pčelić")
+	}
+	if pairs := sectionCoverPairs(section, nil, daruvarPatterns); !pairs[stationPairKey("Pčelić", "Suhopolje")] {
+		t.Errorf("Expected unclipped section to cover Pčelić - Suhopolje (sanity check for the line clipping)")
+	}
+
+	// "Zabok - Gornja Stubica (23.11. - 12.12.)": "između kolodvora (Zabok) – Hum Lug – Gornja Stubica"
+	// on the closed line "pruga Hum Lug – Gornja Stubica"; Zabok - Hum-Lug is shared with the
+	// open Zagreb - Varaždin line, where trains stop at Hum-Lug but at no other line station
+	stubicaLine := []string{"Zabok", "Hum-Lug", "Oroslavje", "Stubičke Toplice", "Donja Stubica", "Gornja Stubica"}
+	varazdinLine := []string{"Zagreb Glavni kolodvor", "Zaprešić", "Zabok", "Hum-Lug", "Zlatar", "Varaždin"}
+	stubicaNotice := NoticeResponse{
+		ID:               "works-26-e727f6e3",
+		SectionStations:  [][]string{{"Zabok", "Hum-Lug", "Gornja Stubica"}},
+		LineStations:     []string{"Hum-Lug", "Gornja Stubica"},
+		IsBusReplacement: true,
+	}
+	stubicaNotice.sectionPairs = sectionCoverPairs(stubicaNotice.SectionStations, stubicaNotice.LineStations, [][]string{stubicaLine, varazdinLine})
+	if m, _, _, _ := isNoticeApplicable(stubicaNotice, "1", stubicaLine, todayStr); !m {
+		t.Errorf("Expected Zabok - Gornja Stubica train to match")
+	}
+	if m, _, _, _ := isNoticeApplicable(stubicaNotice, "1", varazdinLine, todayStr); m {
+		t.Errorf("Expected Zagreb - Varaždin train via Zabok - Hum-Lug NOT to match closed line Hum Lug - Gornja Stubica")
+	}
+
+	// A section no pattern stops at falls back to station overlap
+	unknown := NoticeResponse{
+		ID:              "works-6-63245fbb",
+		ParsedStations:  []string{"Križevci", "Koprivnica"},
+		SectionStations: [][]string{{"Križevci", "Gyekenyes"}},
+	}
+	unknown.sectionPairs = sectionCoverPairs(unknown.SectionStations, nil, patterns)
+	if m, _, _, _ := isNoticeApplicable(unknown, "1", []string{"Križevci", "Koprivnica"}, todayStr); !m {
+		t.Errorf("Expected fallback to station overlap when the section cannot be located")
 	}
 }
 

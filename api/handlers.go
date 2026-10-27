@@ -117,6 +117,10 @@ type Server struct {
 	delayFailedCalls    int64
 	delayLastCallTime   time.Time
 	delayCallHistory    []time.Time
+	stopPatternsMu      sync.Mutex
+	stopPatterns        [][]string
+	stopPatternsLoaded  time.Time
+	sectionPairsCache   sync.Map // notice ID + updated_at -> map[[2]string]bool
 }
 
 func NewServer(db *sql.DB) *Server {
@@ -530,7 +534,7 @@ func (s *Server) GetNotices(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT id, category, title, content, parsed_stations, parsed_trains, pdf_urls,
 		       is_bus_replacement, is_track_works, COALESCE(date_from, ''), COALESCE(date_to, ''),
-		       COALESCE(dates_json, '[]'), updated_at
+		       COALESCE(dates_json, '[]'), updated_at, COALESCE(section_stations, '[]'), COALESCE(line_stations, '[]')
 		FROM traffic_notices
 		ORDER BY is_track_works DESC, is_bus_replacement DESC, id ASC
 	`)
@@ -543,10 +547,10 @@ func (s *Server) GetNotices(w http.ResponseWriter, r *http.Request) {
 	notices := make([]NoticeResponse, 0)
 	for rows.Next() {
 		var n NoticeResponse
-		var stJSON, trJSON, pdfJSON, datesJSONStr string
+		var stJSON, trJSON, pdfJSON, datesJSONStr, sectionsJSON, lineJSON string
 		var isBus, isWorks int
 
-		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &datesJSONStr, &n.UpdatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &datesJSONStr, &n.UpdatedAt, &sectionsJSON, &lineJSON); err != nil {
 			continue
 		}
 
@@ -554,6 +558,8 @@ func (s *Server) GetNotices(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal([]byte(trJSON), &n.ParsedTrains)
 		_ = json.Unmarshal([]byte(pdfJSON), &n.PDFURLs)
 		_ = json.Unmarshal([]byte(datesJSONStr), &n.DatesJSON)
+		_ = json.Unmarshal([]byte(sectionsJSON), &n.SectionStations)
+		_ = json.Unmarshal([]byte(lineJSON), &n.LineStations)
 
 		n.IsBusReplacement = isBus == 1
 		n.IsTrackWorks = isWorks == 1
@@ -569,7 +575,7 @@ func (s *Server) fetchNoticesFromDB() []NoticeResponse {
 	rows, err := s.db.Query(`
 		SELECT id, category, title, content, parsed_stations, parsed_trains, pdf_urls,
 		       is_bus_replacement, is_track_works, COALESCE(date_from, ''), COALESCE(date_to, ''),
-		       COALESCE(dates_json, '[]'), updated_at
+		       COALESCE(dates_json, '[]'), updated_at, COALESCE(section_stations, '[]'), COALESCE(line_stations, '[]')
 		FROM traffic_notices
 	`)
 	if err != nil {
@@ -580,20 +586,166 @@ func (s *Server) fetchNoticesFromDB() []NoticeResponse {
 	var notices []NoticeResponse
 	for rows.Next() {
 		var n NoticeResponse
-		var stJSON, trJSON, pdfJSON, datesJSONStr string
+		var stJSON, trJSON, pdfJSON, datesJSONStr, sectionsJSON, lineJSON string
 		var isBus, isWorks int
 
-		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &datesJSONStr, &n.UpdatedAt); err == nil {
+		if err := rows.Scan(&n.ID, &n.Category, &n.Title, &n.Content, &stJSON, &trJSON, &pdfJSON, &isBus, &isWorks, &n.DateFrom, &n.DateTo, &datesJSONStr, &n.UpdatedAt, &sectionsJSON, &lineJSON); err == nil {
 			_ = json.Unmarshal([]byte(stJSON), &n.ParsedStations)
 			_ = json.Unmarshal([]byte(trJSON), &n.ParsedTrains)
 			_ = json.Unmarshal([]byte(pdfJSON), &n.PDFURLs)
 			_ = json.Unmarshal([]byte(datesJSONStr), &n.DatesJSON)
+			_ = json.Unmarshal([]byte(sectionsJSON), &n.SectionStations)
+			_ = json.Unmarshal([]byte(lineJSON), &n.LineStations)
 			n.IsBusReplacement = isBus == 1
 			n.IsTrackWorks = isWorks == 1
 			notices = append(notices, n)
 		}
 	}
+	for i := range notices {
+		notices[i].sectionPairs = s.getSectionPairs(notices[i])
+	}
 	return notices
+}
+
+// getSectionPairs returns the cached sectionCoverPairs of a notice.
+func (s *Server) getSectionPairs(n NoticeResponse) map[[2]string]bool {
+	if len(n.SectionStations) == 0 {
+		return nil
+	}
+	key := n.ID + "|" + n.UpdatedAt
+	if v, ok := s.sectionPairsCache.Load(key); ok {
+		return v.(map[[2]string]bool)
+	}
+	pairs := sectionCoverPairs(n.SectionStations, n.LineStations, s.getStopPatterns())
+	s.sectionPairsCache.Store(key, pairs)
+	return pairs
+}
+
+// getStopPatterns returns the distinct stop sequences (station names in route order)
+// of all trips, reloaded hourly.
+func (s *Server) getStopPatterns() [][]string {
+	s.stopPatternsMu.Lock()
+	defer s.stopPatternsMu.Unlock()
+	if s.stopPatterns != nil && time.Since(s.stopPatternsLoaded) < time.Hour {
+		return s.stopPatterns
+	}
+
+	rows, err := s.db.Query(`
+		SELECT st.trip_id, s.stop_name
+		FROM stop_times st
+		JOIN stations s ON st.stop_id = s.stop_id
+		ORDER BY st.trip_id, st.stop_sequence
+	`)
+	if err != nil {
+		return s.stopPatterns
+	}
+	defer rows.Close()
+
+	seen := make(map[string]bool)
+	var patterns [][]string
+	var curTrip string
+	var cur []string
+	flush := func() {
+		if key := strings.Join(cur, "\x00"); len(cur) > 1 && !seen[key] {
+			seen[key] = true
+			patterns = append(patterns, cur)
+		}
+		cur = nil
+	}
+	for rows.Next() {
+		var tripID, name string
+		if err := rows.Scan(&tripID, &name); err != nil {
+			continue
+		}
+		if tripID != curTrip {
+			flush()
+			curTrip = tripID
+		}
+		cur = append(cur, name)
+	}
+	flush()
+
+	s.stopPatterns = patterns
+	s.stopPatternsLoaded = time.Now()
+	return patterns
+}
+
+func stationPairKey(a, b string) [2]string {
+	a, b = strings.ToLower(a), strings.ToLower(b)
+	if a > b {
+		a, b = b, a
+	}
+	return [2]string{a, b}
+}
+
+// sectionCoverPairs returns every pair of stations (A, B) such that a train stopping at
+// A and then B runs over part of a closed section. A section is a list of stations along
+// the closed track, e.g. ["Duga Resa", "Oštarije"]. Trains do not always stop at the
+// section ends (an IC may run Karlovac - Ogulin non-stop), so the stop patterns of all
+// trips are used to place each pair relative to the section: in any pattern that stops
+// at both ends X and Y, every pair A..B whose span overlaps X..Y covers the section.
+//
+// When the closed line is known, X..Y is first clipped to the stations on that line, so
+// a section named past the line's end ("Daruvar - Virovitica" on the closed line Banova
+// Jaruga - Pčelić) does not cover track shared with another, open line.
+func sectionCoverPairs(sections [][]string, line []string, patterns [][]string) map[[2]string]bool {
+	lineSet := make(map[string]bool, len(line))
+	for _, st := range line {
+		lineSet[strings.ToLower(st)] = true
+	}
+	// Stations on the line: those between two line stations in some pattern
+	onLine := make(map[string]bool)
+	for _, p := range patterns {
+		lo, hi := len(p), -1
+		for i, name := range p {
+			if lineSet[strings.ToLower(name)] {
+				lo, hi = min(lo, i), max(hi, i)
+			}
+		}
+		for i := lo; i <= hi && lo < hi; i++ {
+			onLine[strings.ToLower(p[i])] = true
+		}
+	}
+
+	pairs := make(map[[2]string]bool)
+	for _, section := range sections {
+		for k := 0; k+1 < len(section); k++ {
+			x, y := strings.ToLower(section[k]), strings.ToLower(section[k+1])
+			for _, p := range patterns {
+				ix, iy := -1, -1
+				for i, name := range p {
+					lname := strings.ToLower(name)
+					if lname == x && ix < 0 {
+						ix = i
+					}
+					if lname == y && iy < 0 {
+						iy = i
+					}
+				}
+				if ix < 0 || iy < 0 {
+					continue
+				}
+				lo, hi := min(ix, iy), max(ix, iy)
+				if len(onLine) > 0 {
+					for lo < hi && !onLine[strings.ToLower(p[lo])] {
+						lo++
+					}
+					for hi > lo && !onLine[strings.ToLower(p[hi])] {
+						hi--
+					}
+					if lo >= hi {
+						continue
+					}
+				}
+				for a := 0; a < hi; a++ {
+					for b := max(a+1, lo+1); b < len(p); b++ {
+						pairs[stationPairKey(p[a], p[b])] = true
+					}
+				}
+			}
+		}
+	}
+	return pairs
 }
 
 func isNoticeActiveOnDate(n NoticeResponse, dateStr string) bool {
@@ -618,11 +770,13 @@ func (s *Server) getTripStationNames(tripID string) []string {
 	if tripID == "" {
 		return nil
 	}
+	// In route order: notice matching looks at consecutive stops
 	rows, err := s.db.Query(`
-		SELECT DISTINCT s.stop_name
+		SELECT s.stop_name
 		FROM stop_times st
 		JOIN stations s ON st.stop_id = s.stop_id
 		WHERE st.trip_id = ?
+		ORDER BY st.stop_sequence
 	`, tripID)
 	if err != nil {
 		return nil
@@ -639,27 +793,38 @@ func (s *Server) getTripStationNames(tripID string) []string {
 	return names
 }
 
+// isNoticeApplicable reports whether notice n affects the train with the given number
+// and stops (station names in route order) on dateStr.
 func isNoticeApplicable(n NoticeResponse, trainNum string, stationNames []string, dateStr string) (matches bool, isBus bool, isWorks bool, noticeID string) {
 	if !isNoticeActiveOnDate(n, dateStr) {
 		return false, false, false, ""
 	}
 
-	// 1. If notice explicitly lists train numbers, match ONLY if this train's number is listed
+	// 1. A train listed in the notice text always matches. The text list is complete
+	// unless the notice links a PDF train list (which is not parsed); only then do
+	// unlisted trains fall back to station matching.
 	if len(n.ParsedTrains) > 0 {
-		trMatched := false
 		for _, tr := range n.ParsedTrains {
 			if tr == trainNum {
-				trMatched = true
-				break
+				return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
 			}
 		}
-		if !trMatched {
+		if len(n.PDFURLs) == 0 {
 			return false, false, false, ""
 		}
-		return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
 	}
 
-	// 2. Otherwise match based on affected station overlap
+	// 2. When the closed section is known, match trains that run through it
+	if len(n.sectionPairs) > 0 {
+		for i := 0; i+1 < len(stationNames); i++ {
+			if n.sectionPairs[stationPairKey(stationNames[i], stationNames[i+1])] {
+				return true, n.IsBusReplacement, n.IsTrackWorks, n.ID
+			}
+		}
+		return false, false, false, ""
+	}
+
+	// 3. Otherwise match based on affected station overlap
 	if len(n.ParsedStations) > 0 {
 		matchedCount := 0
 		for _, st := range n.ParsedStations {

@@ -26,6 +26,15 @@ type NoticeResponse struct {
 	DateTo           string   `json:"date_to,omitempty"`
 	DatesJSON        []string `json:"dates_json,omitempty"`
 	UpdatedAt        string   `json:"updated_at"`
+
+	// SectionStations lists the closed track sections, each as stations in order.
+	SectionStations [][]string `json:"section_stations,omitempty"`
+	// LineStations is the closed railway line; sections are clipped to it.
+	LineStations []string `json:"line_stations,omitempty"`
+
+	// sectionPairs holds every pair of stations between which a train runs through a
+	// closed section (see sectionCoverPairs).
+	sectionPairs map[[2]string]bool
 }
 
 type StationTimetableEntry struct {
