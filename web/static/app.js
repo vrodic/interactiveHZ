@@ -49,14 +49,51 @@ function showToast(title, body, isStationChange = false) {
     }
 
     if ("Notification" in window && Notification.permission === "granted") {
-        try {
-            new Notification(title, {
-                body: body,
-                icon: '/favicon.ico'
+        showBrowserNotification(title, body);
+    }
+}
+
+// Overlays (details panel, modals, trip planner) stack in the order they were opened,
+// staying below the header and mobile menu (z-index 10000+).
+let overlayTopZ = 6000;
+
+function bringOverlayToFront(el) {
+    if (el) el.style.zIndex = String(++overlayTopZ);
+}
+
+let swRegistrationPromise = null;
+
+function registerServiceWorker() {
+    if (!('serviceWorker' in navigator)) return null;
+    if (!swRegistrationPromise) {
+        swRegistrationPromise = navigator.serviceWorker.register('/sw.js')
+            .then(() => navigator.serviceWorker.ready)
+            .catch(e => {
+                console.error('Service worker registration failed:', e);
+                swRegistrationPromise = null;
+                return null;
             });
+    }
+    return swRegistrationPromise;
+}
+
+async function showBrowserNotification(title, body) {
+    const options = { body: body, tag: `hz-${title}`, renotify: true };
+    // Mobile browsers (e.g. Firefox for Android) throw on `new Notification()`;
+    // only the service worker registration can display notifications there.
+    const reg = await registerServiceWorker();
+    if (reg) {
+        try {
+            await reg.showNotification(title, options);
+            return;
         } catch (e) {
-            console.error('Browser Notification error:', e);
+            console.error('Service worker notification error:', e);
         }
+    }
+    try {
+        new Notification(title, options);
+    } catch (e) {
+        console.error('Browser Notification error:', e);
     }
 }
 
@@ -873,8 +910,16 @@ function initNavHandlers() {
     const toggleTimeControlsBtn = document.getElementById('toggle-time-controls-btn');
 
     if (mobileMenuBtn && leftSidebar) {
-        mobileMenuBtn.addEventListener('click', () => {
+        mobileMenuBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
             leftSidebar.classList.toggle('mobile-open');
+        });
+
+        // Tapping anywhere outside the open menu dismisses it.
+        document.addEventListener('click', (e) => {
+            if (leftSidebar.classList.contains('mobile-open') && !leftSidebar.contains(e.target)) {
+                leftSidebar.classList.remove('mobile-open');
+            }
         });
     }
 
@@ -932,12 +977,16 @@ function initNavHandlers() {
     });
 
     const enableNotifsBtn = document.getElementById('enable-notifs-btn');
+    if ("Notification" in window && Notification.permission === "granted") {
+        registerServiceWorker();
+    }
     if (enableNotifsBtn) {
         enableNotifsBtn.addEventListener('click', async () => {
             if ("Notification" in window) {
                 try {
                     const perm = await Notification.requestPermission();
                     updateNotificationButtonUI();
+                    closeMobileMenu();
                     if (perm === "granted") {
                         showToast("🔔 Notifications Enabled", "You will now receive desktop notifications for train delay updates and station changes.");
                     } else if (perm === "denied") {
@@ -972,6 +1021,7 @@ function initNavHandlers() {
     document.getElementById('nav-routes').addEventListener('click', () => {
         closeMobileMenu();
         tripPlannerDrawer.style.display = 'flex';
+        bringOverlayToFront(tripPlannerDrawer);
     });
 
     document.getElementById('close-trip-planner-drawer').addEventListener('click', () => {
@@ -1003,6 +1053,11 @@ function initNavHandlers() {
                 findRoutePlans();
             }
         });
+    }
+
+    const fromLocateBtn = document.getElementById('route-from-locate-btn');
+    if (fromLocateBtn) {
+        fromLocateBtn.addEventListener('click', fillOriginFromGeolocation);
     }
 
     setupStationAutocomplete('route-from-input', 'route-from-id', 'route-from-results');
@@ -1081,6 +1136,7 @@ function initDelaysSSEStream() {
 function openDelaysStreamModal() {
     const modal = document.getElementById('delays-stream-modal');
     modal.style.display = 'flex';
+    bringOverlayToFront(modal);
 }
 
 function appendStreamLog(data) {
@@ -1166,6 +1222,7 @@ function openNoticesModal(highlightNoticeId = null) {
     const modal = document.getElementById('notices-modal');
     if (modal) {
         modal.style.display = 'flex';
+        bringOverlayToFront(modal);
         renderNoticesModalBody();
 
         if (highlightNoticeId) {
@@ -1233,6 +1290,7 @@ function openActiveTrainsModal() {
     `;
 
     modal.style.display = 'flex';
+    bringOverlayToFront(modal);
 
     body.querySelectorAll('.active-train-row').forEach(row => {
         row.addEventListener('click', () => {
@@ -1253,6 +1311,7 @@ async function openDashboardModal() {
 
     body.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 20px;">Loading live dashboard metrics...</p>';
     modal.style.display = 'flex';
+    bringOverlayToFront(modal);
 
     try {
         const resp = await fetch(`/api/dashboard?time=${formatSecondsToTime(currentTimeSec)}`);
@@ -1439,6 +1498,52 @@ function setupStationAutocomplete(inputId, idInputId, resultsId) {
             resultsEl.style.display = 'none';
         }
     });
+}
+
+function fillOriginFromGeolocation() {
+    const btn = document.getElementById('route-from-locate-btn');
+    if (!('geolocation' in navigator)) {
+        showToast('📍 Location unavailable', 'Your browser does not support geolocation.');
+        return;
+    }
+    if (stationsData.length === 0) {
+        showToast('📍 Stations not loaded', 'Station list is still loading, please try again in a moment.');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.classList.add('loading');
+    navigator.geolocation.getCurrentPosition((pos) => {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+        const { latitude, longitude } = pos.coords;
+
+        let nearest = null;
+        let nearestDist = Infinity;
+        stationsData.forEach(st => {
+            const d = haversineKm(latitude, longitude, st.lat, st.lon);
+            if (d < nearestDist) {
+                nearestDist = d;
+                nearest = st;
+            }
+        });
+        if (!nearest) return;
+
+        document.getElementById('route-from-input').value = nearest.stop_name;
+        document.getElementById('route-from-id').value = nearest.stop_id;
+        showToast('📍 Nearest station', `${nearest.stop_name} (${nearestDist.toFixed(1)} km away)`);
+
+        if (document.getElementById('route-to-id').value) {
+            findRoutePlans();
+        }
+    }, (err) => {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+        const msg = err.code === err.PERMISSION_DENIED
+            ? 'Location access was denied. Allow location for this site to use this feature.'
+            : 'Could not determine your location.';
+        showToast('📍 Location error', msg);
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
 }
 
 function renderRecentPairs() {
@@ -1774,14 +1879,23 @@ function renderSegments() {
     updateSegmentVisibility();
 }
 
+function mapPopupOptions() {
+    const isMobile = window.innerWidth <= 768;
+    return {
+        maxWidth: Math.min(360, window.innerWidth - 40),
+        autoPanPaddingTopLeft: L.point(isMobile ? 10 : 180, 20),
+        autoPanPaddingBottomRight: L.point(20, isMobile ? 20 : 90),
+    };
+}
+
 async function openSegmentDetails(seg) {
     const midLat = (seg.from_lat + seg.to_lat) / 2;
     const midLon = (seg.from_lon + seg.to_lon) / 2;
 
-    const popup = L.popup()
+    const popup = L.popup(mapPopupOptions())
         .setLatLng([midLat, midLon])
         .setContent(`
-            <div style="width: 300px; padding: 10px;">
+            <div style="width: min(300px, calc(100vw - 80px)); padding: 10px;">
                 <h3 style="margin-bottom: 4px; color: #3b82f6;">📍 ${escapeHTML(seg.from_stop_name)} ➔ ${escapeHTML(seg.to_stop_name)}</h3>
                 <p style="color: #a0aec0; font-size: 12px;"><em>Loading scheduled train details...</em></p>
             </div>
@@ -1810,7 +1924,7 @@ async function openSegmentDetails(seg) {
         }
 
         const popupHTML = `
-            <div style="max-height: 280px; overflow-y: auto; width: 300px;">
+            <div style="max-height: 280px; overflow-y: auto; width: min(300px, calc(100vw - 80px));">
                 <h3 style="margin-bottom: 4px; color: #3b82f6;">📍 ${escapeHTML(seg.from_stop_name)} ➔ ${escapeHTML(seg.to_stop_name)}</h3>
                 <div style="font-size: 12px; color: #a0aec0; margin-bottom: 10px;">
                     Distance: <strong>${seg.distance_km.toFixed(1)} km</strong> | Avg Speed: <strong style="color: #10b981;">${Math.round(seg.avg_speed_kmh)} km/h</strong> (${seg.train_count} trains)
@@ -1833,7 +1947,7 @@ async function openSegmentDetails(seg) {
         popup.setContent(popupHTML);
     } catch (e) {
         popup.setContent(`
-            <div style="width: 300px; padding: 10px; color: #ef4444;">
+            <div style="width: min(300px, calc(100vw - 80px)); padding: 10px; color: #ef4444;">
                 Failed to load segment details: ${escapeHTML(e.message)}
             </div>
         `);
@@ -1891,7 +2005,7 @@ async function openStationTimetable(station) {
         const resp = await fetch(`/api/stations/${encodeURIComponent(station.stop_id)}/timetable`);
         const entries = await resp.json();
 
-        let timetableHTML = `<div style="max-height: 280px; overflow-y: auto; width: 340px;" class="timetable-popup-container">
+        let timetableHTML = `<div style="max-height: 280px; overflow-y: auto; width: min(340px, calc(100vw - 80px));" class="timetable-popup-container">
             <h3 style="margin-bottom: 8px; color: #00e5ff;">🚉 ${escapeHTML(station.stop_name)}</h3>
             <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
                 <thead>
@@ -1935,7 +2049,7 @@ async function openStationTimetable(station) {
 
         timetableHTML += `</tbody></table></div>`;
 
-        const popup = L.popup()
+        const popup = L.popup(mapPopupOptions())
             .setLatLng([station.lat, station.lon])
             .setContent(timetableHTML)
             .openOn(map);
@@ -2057,6 +2171,7 @@ async function fetchAndDisplayTrainDetails(trainNum) {
     showLocateTrainButton();
 
     panel.style.display = 'block';
+    bringOverlayToFront(panel);
     content.innerHTML = `<p style="color: #a0aec0; text-align: center; padding: 20px;">Loading details for Train ${escapeHTML(trainNum)}...</p>`;
 
     try {
@@ -2460,6 +2575,7 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
     }
 
     panel.style.display = 'block';
+    if (isNewOpen) bringOverlayToFront(panel);
 
     if (!train.delay_distribution || !train.recent_delays) {
         fetch(`/api/trains/${encodeURIComponent(trNum)}`)

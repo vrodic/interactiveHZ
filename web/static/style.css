@@ -18,6 +18,8 @@ body, html {
     flex-direction: column;
     width: 100vw;
     height: 100vh;
+    /* dvh excludes mobile browser toolbars, so bottom content isn't hidden behind them. */
+    height: 100dvh;
     position: relative;
 }
 
@@ -200,7 +202,8 @@ body, html {
     border: 1px solid #2a313d;
     border-radius: 12px;
     padding: 16px;
-    z-index: 2000;
+    /* Above the trip planner drawer, which can open train details */
+    z-index: 2600;
     box-shadow: 0 12px 30px rgba(0,0,0,0.6);
     overflow-y: auto;
     display: none;
@@ -847,8 +850,13 @@ body, html {
     /* Left Sidebar as Mobile Menu Dropdown/Overlay (Option A) */
     #left-sidebar {
         display: none;
-        position: absolute;
+        position: fixed;
         top: 56px;
+        /* Above the details panel, modals and trip planner so the menu always opens on top. */
+        z-index: 10001;
+        max-height: calc(100vh - 56px);
+        max-height: calc(100dvh - 56px);
+        overflow-y: auto;
         left: 0;
         right: 0;
         width: 100vw;
@@ -873,21 +881,23 @@ body, html {
         justify-content: flex-start;
     }
 
-    /* Details Panel as Full Screen Overlay on Mobile */
+    /* Details Panel as Full Screen Overlay on Mobile, below the header so the menu stays reachable */
     #side-panel {
         position: fixed;
-        top: 0;
+        top: 56px;
         left: 0;
         right: 0;
         bottom: 0;
         width: 100vw;
-        height: 100vh;
-        max-height: 100vh;
+        height: auto;
+        max-height: none;
         border-radius: 0;
         border: none;
-        z-index: 20000;
-        padding: 16px;
+        /* Above the trip planner drawer (train rows open details), below modals (notice badges) */
+        z-index: 5600;
+        padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
         background: rgba(15, 18, 23, 0.98);
+        -webkit-overflow-scrolling: touch;
     }
 
     /* Time Controls Mobile Compact Bar */
@@ -925,11 +935,22 @@ body, html {
         min-width: 100px;
     }
 
-    /* Modals & Tables Full Width Touch Scrollable */
+    /* Modals & Tables Full Width Touch Scrollable; overlay starts below the header */
+    .modal-overlay {
+        top: 56px;
+        z-index: 6000;
+        padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
+    }
+
     .modal-content {
         width: 96vw;
-        max-height: 90vh;
+        max-height: 100%;
         margin: 0 2vw;
+    }
+
+    .modal-header .panel-title {
+        font-size: 15px;
+        min-width: 0;
     }
 
     .modal-header {
@@ -962,7 +983,11 @@ body, html {
     /* Bottom Drawer / Trip Planner Mobile Optimizations */
     .bottom-drawer {
         height: 85vh;
-        max-height: 85vh;
+        height: calc(100dvh - 72px);
+        max-height: calc(100vh - 56px);
+        max-height: calc(100dvh - 56px);
+        z-index: 5500;
+        padding-bottom: env(safe-area-inset-bottom);
     }
 
     .drawer-body {
@@ -1037,4 +1062,31 @@ body, html {
 @keyframes locate-flash-bounce {
     0%, 100% { transform: scale(1); }
     50% { transform: scale(1.6); }
+}
+
+.route-locate-btn {
+    flex-shrink: 0;
+    padding: 0 12px;
+    background: #2a313d;
+    border: 1px solid #3a4250;
+    border-radius: 6px;
+    color: #00e5ff;
+    font-size: 15px;
+    cursor: pointer;
+}
+
+.route-locate-btn:hover {
+    background: #2563eb;
+    border-color: #60a5fa;
+}
+
+.route-locate-btn.loading {
+    opacity: 0.6;
+    cursor: wait;
+    animation: route-locate-pulse 1s ease-in-out infinite;
+}
+
+@keyframes route-locate-pulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
 }
