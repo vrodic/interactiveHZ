@@ -567,6 +567,8 @@ func (s *Server) GetNotices(w http.ResponseWriter, r *http.Request) {
 		notices = append(notices, n)
 	}
 
+	// Notices are re-scraped hourly; a short cache saves repeat loads without hiding new ones for long.
+	w.Header().Set("Cache-Control", "public, max-age=120")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(notices)
 }
@@ -871,6 +873,8 @@ func (s *Server) GetStations(w http.ResponseWriter, r *http.Request) {
 		stations = append(stations, st)
 	}
 
+	// Stations only change with a GTFS import, which happens at most daily.
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stations)
 }
@@ -1044,10 +1048,54 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 		}
 	}
 
+	activeTrainsMap := make(map[string]ActiveTrain)
+
+	// GTFS lists trains that run past midnight under the previous day's service with
+	// times beyond 24:00, so after midnight they are found via yesterday's calendar
+	// at secondsOfDay+24h. Returned schedule times are shifted back into today's clock.
+	if err := s.collectActiveTrains(activeTrainsMap, zgNow, secondsOfDay, 0, delayMap); err != nil {
+		return nil, err
+	}
+	if err := s.collectActiveTrains(activeTrainsMap, zgNow.AddDate(0, 0, -1), secondsOfDay+86400, 86400, delayMap); err != nil {
+		return nil, err
+	}
+
+	allNotices := s.fetchNoticesFromDB()
+	todayStr := zgNow.Format("2006-01-02")
+
+	activeTrains := make([]ActiveTrain, 0, len(activeTrainsMap))
+	for _, train := range activeTrainsMap {
+		stNames := s.getTripStationNames(train.TripID)
+		if len(stNames) == 0 {
+			stNames = []string{train.PrevStationName, train.NextStationName, train.FirstStationName, train.LastStationName}
+		}
+		for _, n := range allNotices {
+			matched, isBus, isWorks, noticeID := isNoticeApplicable(n, train.TrainNumber, stNames, todayStr)
+			if matched {
+				if isBus {
+					train.IsBusReplacement = true
+				}
+				if isWorks {
+					train.IsTrackWorks = true
+				}
+				if train.NoticeID == "" {
+					train.NoticeID = noticeID
+				}
+			}
+		}
+		activeTrains = append(activeTrains, train)
+	}
+
+	return activeTrains, nil
+}
+
+// collectActiveTrains adds the trains of serviceDay's timetable that are running at
+// secondsOfDay (in that service day's clock) to activeTrainsMap.
+func (s *Server) collectActiveTrains(activeTrainsMap map[string]ActiveTrain, serviceDay time.Time, secondsOfDay, secOffset int, delayMap map[string]int) error {
 	windowStart := secondsOfDay - 10800
 	windowEnd := secondsOfDay + 1800
 
-	calCond, calArgs := getCalendarCondition(zgNow)
+	calCond, calArgs := getCalendarCondition(serviceDay)
 
 	calCondInTrips := strings.ReplaceAll(calCond, "t.service_id", "t2.service_id")
 
@@ -1070,11 +1118,9 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		fmt.Printf("ComputeActiveTrains DB Query Error: %v\n", err)
-		return nil, err
+		return err
 	}
 	defer rows.Close()
-
-	activeTrainsMap := make(map[string]ActiveTrain)
 
 	for rows.Next() {
 		var (
@@ -1155,40 +1201,13 @@ func (s *Server) ComputeActiveTrains(secondsOfDay int) ([]ActiveTrain, error) {
 					Progress:           progress,
 					Status:             status,
 					DelayMinutes:       delayMinutes,
-					ScheduledDepSec:    s1DepSec,
-					ScheduledArrSec:    s2ArrSec,
+					ScheduledDepSec:    s1DepSec - secOffset,
+					ScheduledArrSec:    s2ArrSec - secOffset,
 				}
 			}
 		}
 	}
-
-	allNotices := s.fetchNoticesFromDB()
-	todayStr := zgNow.Format("2006-01-02")
-
-	activeTrains := make([]ActiveTrain, 0, len(activeTrainsMap))
-	for _, train := range activeTrainsMap {
-		stNames := s.getTripStationNames(train.TripID)
-		if len(stNames) == 0 {
-			stNames = []string{train.PrevStationName, train.NextStationName, train.FirstStationName, train.LastStationName}
-		}
-		for _, n := range allNotices {
-			matched, isBus, isWorks, noticeID := isNoticeApplicable(n, train.TrainNumber, stNames, todayStr)
-			if matched {
-				if isBus {
-					train.IsBusReplacement = true
-				}
-				if isWorks {
-					train.IsTrackWorks = true
-				}
-				if train.NoticeID == "" {
-					train.NoticeID = noticeID
-				}
-			}
-		}
-		activeTrains = append(activeTrains, train)
-	}
-
-	return activeTrains, nil
+	return nil
 }
 
 func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
@@ -1960,9 +1979,16 @@ func (s *Server) FetchAndSaveTrainDelay(trainID string) (*DelayAPIResponse, erro
 			`, trainID, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt, nowZagrebStr)
 
 			if shouldRecordHist {
+				// Concurrent fetches of the same train can both get here; the single
+				// INSERT ... WHERE NOT EXISTS keeps an identical reading from being stored twice.
 				_, _ = s.db.Exec(`
 					INSERT INTO historical_train_delays (train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at)
-					VALUES (?, ?, ?, ?, ?, ?, ?)
+					SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+					WHERE NOT EXISTS (
+						SELECT 1 FROM historical_train_delays
+						WHERE train_number = ?1 AND delay_date = ?2 AND delay_minutes = ?3 AND position_status IS ?4
+						  AND last_station IS ?5 AND next_station IS ?6 AND updated_at = ?7
+					)
 				`, trainID, todayStr, delayMins, delayResp.Data.PositionStatus, delayResp.Data.LastStation, nextSt, nowZagrebStr)
 			}
 

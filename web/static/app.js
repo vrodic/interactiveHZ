@@ -29,6 +29,13 @@ let selectedTrainLastDelay = null;
 let trainDelayDistributions = {};
 let trainRecentDelays = {};
 
+// Timetables are in Croatian time, so "now" must be Zagreb time whatever the viewer's time zone.
+const zagrebTimeFormat = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Zagreb', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+});
+let zagrebOffsetSec = null;
+let zagrebOffsetCheckedAt = 0;
+
 function showToast(title, body, isStationChange = false) {
     const container = document.getElementById('toast-container');
     if (container) {
@@ -61,6 +68,205 @@ function bringOverlayToFront(el) {
     if (el) el.style.zIndex = String(++overlayTopZ);
 }
 
+// --- Overlay history: each opened overlay is a history entry, so Back closes it, and
+// its URL hash (#train/2702, #notices, #planner/<from>/<to>, ...) can be shared. ---
+const OVERLAY_IDS = ['side-panel', 'notices-modal', 'active-trains-modal', 'dashboard-modal', 'delays-stream-modal', 'trip-planner-drawer'];
+const OVERLAY_HIDERS = {
+    'side-panel': () => {
+        document.getElementById('side-panel').style.display = 'none';
+        currentOpenedTrainNum = null;
+        selectedTrainNum = null;
+        stopAcceleratedPollingForSelectedTrain();
+        clearSelectedTrainRoute();
+        updateTrainMarkersClientSide();
+    },
+};
+let historyBackPending = false;
+let queuedHistoryOps = [];
+let applyingHashRoute = false;
+let activeTrainsModalAwaitingData = false;
+
+function isOverlayOpen(id) {
+    const el = document.getElementById(id);
+    return !!el && getComputedStyle(el).display !== 'none';
+}
+
+function hideOverlay(id) {
+    if (OVERLAY_HIDERS[id]) {
+        OVERLAY_HIDERS[id]();
+    } else {
+        const el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+    }
+}
+
+// history.back() is asynchronous: history changes requested before its popstate
+// arrives are queued, or they would be undone by it.
+function runHistoryOp(op) {
+    if (historyBackPending) {
+        queuedHistoryOps.push(op);
+    } else {
+        op();
+    }
+}
+
+function pushOverlayState(overlay, hash) {
+    if (applyingHashRoute) {
+        history.replaceState({ overlay, hash }, '', hash);
+        return;
+    }
+    runHistoryOp(() => {
+        const state = { overlay, hash };
+        // Switching content within the same overlay (another train) replaces the entry,
+        // so Back closes the overlay instead of stepping through every train viewed.
+        if (history.state && history.state.overlay === overlay) {
+            history.replaceState(state, '', hash);
+        } else {
+            history.pushState(state, '', hash);
+        }
+    });
+}
+
+// Changes the shareable URL without adding a history entry (station pop-ups, planner pairs).
+function replaceUrlHash(hash) {
+    runHistoryOp(() => {
+        history.replaceState(Object.assign({}, history.state, { urlHash: hash }), '', hash || location.pathname);
+    });
+}
+
+function restoreUrlHash() {
+    runHistoryOp(() => {
+        const state = history.state || {};
+        history.replaceState(Object.assign({}, state, { urlHash: null }), '', state.hash || location.pathname);
+    });
+}
+
+function closeOverlay(id) {
+    if (history.state && history.state.overlay === id && !historyBackPending) {
+        historyBackPending = true;
+        history.back();
+    } else {
+        hideOverlay(id);
+    }
+}
+
+function topOpenOverlay() {
+    let top = null;
+    let topZ = -Infinity;
+    OVERLAY_IDS.forEach(id => {
+        if (!isOverlayOpen(id)) return;
+        const z = Number(getComputedStyle(document.getElementById(id)).zIndex) || 0;
+        if (z >= topZ) {
+            topZ = z;
+            top = id;
+        }
+    });
+    return top;
+}
+
+window.addEventListener('popstate', (e) => {
+    historyBackPending = false;
+    const target = e.state && e.state.overlay;
+    OVERLAY_IDS.forEach(id => {
+        if (id !== target && isOverlayOpen(id)) hideOverlay(id);
+    });
+    if (map) map.closePopup();
+    if (target && !isOverlayOpen(target)) {
+        // Forward navigation to an overlay that was closed: reopen it from its link.
+        applyHashRoute(e.state.hash);
+    }
+    const ops = queuedHistoryOps;
+    queuedHistoryOps = [];
+    ops.forEach(op => op());
+});
+
+function applyHashRoute(hash) {
+    const parts = (hash || '').replace(/^#/, '').split('/').map(decodeURIComponent);
+    const route = parts[0];
+    if (!route) return false;
+
+    applyingHashRoute = true;
+    try {
+        switch (route) {
+            case 'train':
+                if (!parts[1]) return false;
+                openTrainDetails({ train_number: parts[1] });
+                return true;
+            case 'station': {
+                const st = stationsData.find(x => x.stop_id === parts[1]);
+                if (!st) return false;
+                map.setView([st.lat, st.lon], 12);
+                openStationTimetable(st);
+                return true;
+            }
+            case 'notices':
+                openNoticesModal(parts[1] || null);
+                return true;
+            case 'active-trains':
+                openActiveTrainsModal();
+                if (activeTrainsData.length === 0) activeTrainsModalAwaitingData = true;
+                return true;
+            case 'dashboard':
+                openDashboardModal();
+                return true;
+            case 'live-delays':
+                openDelaysStreamModal();
+                return true;
+            case 'planner': {
+                openTripPlanner();
+                const from = stationsData.find(x => x.stop_id === parts[1]);
+                const to = stationsData.find(x => x.stop_id === parts[2]);
+                if (from && to) {
+                    document.getElementById('route-from-input').value = from.stop_name;
+                    document.getElementById('route-from-id').value = from.stop_id;
+                    document.getElementById('route-to-input').value = to.stop_name;
+                    document.getElementById('route-to-id').value = to.stop_id;
+                    findRoutePlans();
+                }
+                return true;
+            }
+        }
+        return false;
+    } finally {
+        applyingHashRoute = false;
+    }
+}
+
+let initialHashRoute = location.hash;
+if (initialHashRoute) {
+    // The deep-linked overlay goes on top of a plain map entry, so Back returns to the map.
+    history.replaceState({}, '', location.pathname);
+}
+
+function applyInitialHashRoute() {
+    if (!initialHashRoute) return;
+    const hash = initialHashRoute;
+    initialHashRoute = null;
+    // A shared link wins over re-opening the last trip planner search.
+    startupRouteHandled = true;
+    const route = (hash.match(/^#([\w-]+)/) || [])[1];
+    if (route && route !== 'station') {
+        history.pushState({ overlay: 'pending' }, '', hash);
+    }
+    applyHashRoute(hash);
+}
+
+// Updates the link of an overlay's history entry while it is the top one.
+function updateOverlayHash(overlay, hash) {
+    runHistoryOp(() => {
+        if (history.state && history.state.overlay === overlay) {
+            history.replaceState(Object.assign({}, history.state, { hash }), '', hash);
+        }
+    });
+}
+
+function openTripPlanner() {
+    const drawer = document.getElementById('trip-planner-drawer');
+    drawer.style.display = 'flex';
+    bringOverlayToFront(drawer);
+    pushOverlayState('trip-planner-drawer', '#planner');
+}
+
 let swRegistrationPromise = null;
 
 function registerServiceWorker() {
@@ -78,7 +284,7 @@ function registerServiceWorker() {
 }
 
 async function showBrowserNotification(title, body) {
-    const options = { body: body, tag: `hz-${title}`, renotify: true };
+    const options = { body: body, icon: '/icon-192.png', badge: '/icon-192.png', tag: `hz-${title}`, renotify: true };
     // Mobile browsers (e.g. Firefox for Android) throw on `new Notification()`;
     // only the service worker registration can display notifications there.
     const reg = await registerServiceWorker();
@@ -104,20 +310,20 @@ function updateNotificationButtonUI() {
 
     if ("Notification" in window) {
         if (Notification.permission === "granted") {
-            label.textContent = "Notifs Active";
+            label.textContent = t('Notifs Active');
             btn.style.borderColor = "#10b981";
             btn.style.color = "#10b981";
         } else if (Notification.permission === "denied") {
-            label.textContent = "Notifs Blocked";
+            label.textContent = t('Notifs Blocked');
             btn.style.borderColor = "#ef4444";
             btn.style.color = "#ef4444";
         } else {
-            label.textContent = "Enable Notifs";
+            label.textContent = t('Enable Notifs');
             btn.style.borderColor = "";
             btn.style.color = "";
         }
     } else {
-        label.textContent = "Notifs Unsupported";
+        label.textContent = t('Notifs Unsupported');
     }
 }
 
@@ -133,7 +339,7 @@ function updateDelayStatsUI(stats) {
     if (minEl) minEl.textContent = stats.calls_last_minute || 0;
     if (hourEl) hourEl.textContent = stats.calls_last_hour || 0;
     if (sfEl) sfEl.textContent = `${stats.successful_calls || 0} / ${stats.failed_calls || 0}`;
-    if (lastEl) lastEl.textContent = stats.last_call_time || 'Never';
+    if (lastEl) lastEl.textContent = stats.last_call_time || t('Never');
 }
 
 function startAcceleratedPollingForSelectedTrain(trainNum) {
@@ -181,18 +387,18 @@ function checkStationChangeAndNotify(trainNum, delayData) {
 
     // 1. Check Station Transition
     if (lastStation && selectedTrainLastStation !== null && selectedTrainLastStation !== lastStation) {
-        const title = `🚆 Train ${trainNum} Station Update`;
-        const body = `Train ${trainNum} reached station: ${lastStation} (Status: ${posStatus || 'In Transit'}${nextStation ? ', Next: ' + nextStation : ''})`;
+        const title = t('🚆 Train {n} Station Update', { n: trainNum });
+        const body = t('Train {n} reached station: {station}', { n: trainNum, station: lastStation }) + ` (${t('Status')}: ${posStatus || t('In Transit')}${nextStation ? ', ' + t('Next') + ': ' + nextStation : ''})`;
         showToast(title, body, true);
     }
 
     // 2. Check Delay Changes
     if (delayVal !== null && selectedTrainLastDelay !== null && selectedTrainLastDelay !== delayVal) {
         const diff = delayVal - selectedTrainLastDelay;
-        const diffStr = diff > 0 ? `+${diff}m increase` : `${diff}m decrease`;
-        const delayStr = delayVal > 0 ? `+${delayVal} min delay` : 'On Time';
-        const title = `⚠️ Train ${trainNum} Delay Update`;
-        const body = `Train ${trainNum} delay status updated: ${delayStr} (${diffStr}). Current location: ${lastStation || 'In Transit'}.`;
+        const diffStr = diff > 0 ? t('+{m}m increase', { m: diff }) : t('{m}m decrease', { m: diff });
+        const delayStr = delayVal > 0 ? t('+{m} min delay', { m: delayVal }) : t('On Time');
+        const title = t('⚠️ Train {n} Delay Update', { n: trainNum });
+        const body = t('Train {n} delay status updated: {delay} ({diff}). Current location: {loc}.', { n: trainNum, delay: delayStr, diff: diffStr, loc: lastStation || t('In Transit') });
         showToast(title, body, false);
     }
 
@@ -226,8 +432,17 @@ function removeDiacritics(str) {
 }
 
 function getCurrentSecondsOfDay() {
-    const d = new Date();
-    return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds() + d.getMilliseconds() / 1000;
+    const nowMs = Date.now();
+    // The UTC offset only changes at DST switches; re-check it once a minute instead of every frame.
+    if (zagrebOffsetSec === null || nowMs - zagrebOffsetCheckedAt > 60000) {
+        const parts = {};
+        zagrebTimeFormat.formatToParts(new Date(nowMs)).forEach(p => { parts[p.type] = Number(p.value); });
+        const zagrebSec = parts.hour * 3600 + parts.minute * 60 + parts.second;
+        const utcSec = Math.floor(nowMs / 1000) % 86400;
+        zagrebOffsetSec = ((zagrebSec - utcSec) % 86400 + 86400) % 86400;
+        zagrebOffsetCheckedAt = nowMs;
+    }
+    return ((nowMs / 1000 + zagrebOffsetSec) % 86400 + 86400) % 86400;
 }
 
 function formatSecondsToTime(totalSec) {
@@ -250,6 +465,8 @@ function stripSeconds(timeStr) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    applyStaticTranslations();
+    initLanguageToggle();
     initMap();
     initControls();
     initNavHandlers();
@@ -315,6 +532,7 @@ async function checkStartupRouteSelection() {
 }
 
 let hideSpeedMarkers = false;
+let openMapPopup = null;
 
 function initMap() {
     map = L.map('map').fitBounds([
@@ -351,14 +569,20 @@ function initMap() {
     };
 
     L.control.layers(baseMaps, overlayMaps, { position: 'topright' }).addTo(map);
+    new LocateControl().addTo(map);
 
     segmentsLayerGroup.addTo(map);
     segmentBadgesLayerGroup.addTo(map);
 
     map.on('zoomend', updateSegmentVisibility);
     map.on('moveend overlayadd', updateVisibleSegmentBadges);
-    map.on('popupclose', () => {
+    map.on('popupopen', (e) => { openMapPopup = e.popup; });
+    map.on('popupclose', (e) => {
+        if (openMapPopup === e.popup) openMapPopup = null;
         clearSelectedStationHighlight();
+        if (e.popup && e.popup.isStationTimetable && history.state && history.state.urlHash) {
+            restoreUrlHash();
+        }
     });
 }
 
@@ -420,11 +644,11 @@ function initControls() {
     playBtn.addEventListener('click', () => {
         isPlaying = !isPlaying;
         if (isPlaying) {
-            playBtn.textContent = '⏸ Pause';
+            playBtn.textContent = t('⏸ Pause');
             isRealtime = false;
             realtimeBtn.classList.remove('active');
         } else {
-            playBtn.textContent = '▶ Play';
+            playBtn.textContent = t('▶ Play');
         }
     });
 
@@ -437,7 +661,7 @@ function initControls() {
     realtimeBtn.addEventListener('click', () => {
         isRealtime = true;
         isPlaying = false;
-        playBtn.textContent = '▶ Play';
+        playBtn.textContent = t('▶ Play');
         realtimeBtn.classList.add('active');
         currentTimeSec = getCurrentSecondsOfDay();
         timeSlider.value = currentTimeSec;
@@ -477,7 +701,7 @@ function initControls() {
 
                 searchResults.innerHTML = '';
                 if (!items || items.length === 0) {
-                    searchResults.innerHTML = '<div class="search-item" style="color: #a0aec0; cursor: default;">No stations or trains found</div>';
+                    searchResults.innerHTML = `<div class="search-item search-item-empty">${t('No stations or trains found')}</div>`;
                     searchResults.style.display = 'block';
                     return;
                 }
@@ -487,7 +711,7 @@ function initControls() {
                     div.className = 'search-item';
                     div.dataset.index = index;
                     const icon = item.type === 'station' ? '🚉' : '🚆';
-                    div.innerHTML = `<strong>${icon} ${escapeHTML(item.title)}</strong> <span style="font-size: 11px; color: #a0aec0;">(${escapeHTML(item.subtitle)})</span>`;
+                    div.innerHTML = `<strong>${icon} ${escapeHTML(item.title)}</strong> <span class="search-item-sub">(${escapeHTML(item.subtitle)})</span>`;
                     div.onclick = () => {
                         selectSearchResult(item);
                     };
@@ -556,12 +780,7 @@ function initControls() {
     });
 
     document.getElementById('close-panel').addEventListener('click', () => {
-        document.getElementById('side-panel').style.display = 'none';
-        currentOpenedTrainNum = null;
-        selectedTrainNum = null;
-        stopAcceleratedPollingForSelectedTrain();
-        clearSelectedTrainRoute();
-        updateTrainMarkersClientSide();
+        closeOverlay('side-panel');
     });
 }
 
@@ -903,7 +1122,6 @@ function initNavHandlers() {
     const activeTrainsModal = document.getElementById('active-trains-modal');
     const dashboardModal = document.getElementById('dashboard-modal');
     const delaysStreamModal = document.getElementById('delays-stream-modal');
-    const tripPlannerDrawer = document.getElementById('trip-planner-drawer');
     const leftSidebar = document.getElementById('left-sidebar');
     const timeControls = document.getElementById('time-controls');
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
@@ -946,7 +1164,7 @@ function initNavHandlers() {
     });
 
     document.getElementById('close-notices-modal').addEventListener('click', () => {
-        noticesModal.style.display = 'none';
+        closeOverlay('notices-modal');
     });
 
     document.getElementById('nav-active-trains').addEventListener('click', () => {
@@ -955,7 +1173,7 @@ function initNavHandlers() {
     });
 
     document.getElementById('close-active-trains-modal').addEventListener('click', () => {
-        activeTrainsModal.style.display = 'none';
+        closeOverlay('active-trains-modal');
     });
 
     document.getElementById('nav-dashboard').addEventListener('click', () => {
@@ -964,7 +1182,7 @@ function initNavHandlers() {
     });
 
     document.getElementById('close-dashboard-modal').addEventListener('click', () => {
-        dashboardModal.style.display = 'none';
+        closeOverlay('dashboard-modal');
     });
 
     document.getElementById('nav-delays-stream').addEventListener('click', () => {
@@ -973,13 +1191,12 @@ function initNavHandlers() {
     });
 
     document.getElementById('close-delays-stream-modal').addEventListener('click', () => {
-        delaysStreamModal.style.display = 'none';
+        closeOverlay('delays-stream-modal');
     });
 
     const enableNotifsBtn = document.getElementById('enable-notifs-btn');
-    if ("Notification" in window && Notification.permission === "granted") {
-        registerServiceWorker();
-    }
+    // Registered up front: it also makes the site installable to the home screen.
+    registerServiceWorker();
     if (enableNotifsBtn) {
         enableNotifsBtn.addEventListener('click', async () => {
             if ("Notification" in window) {
@@ -988,15 +1205,15 @@ function initNavHandlers() {
                     updateNotificationButtonUI();
                     closeMobileMenu();
                     if (perm === "granted") {
-                        showToast("🔔 Notifications Enabled", "You will now receive desktop notifications for train delay updates and station changes.");
+                        showToast(t('🔔 Notifications Enabled'), t('You will now receive desktop notifications for train delay updates and station changes.'));
                     } else if (perm === "denied") {
-                        alert("Notifications are blocked in your browser settings. Please enable notifications for this site to receive updates.");
+                        alert(t('Notifications are blocked in your browser settings. Please enable notifications for this site to receive updates.'));
                     }
                 } catch (e) {
                     console.error("Failed to request notification permission:", e);
                 }
             } else {
-                alert("Desktop notifications are not supported by your browser.");
+                alert(t('Desktop notifications are not supported by your browser.'));
             }
         });
         updateNotificationButtonUI();
@@ -1008,10 +1225,10 @@ function initNavHandlers() {
         toggleSpeedsBtn.addEventListener('click', () => {
             hideSpeedMarkers = !hideSpeedMarkers;
             if (hideSpeedMarkers) {
-                toggleSpeedsLabel.textContent = 'Show Speeds';
+                toggleSpeedsLabel.textContent = t('Show Speeds');
                 toggleSpeedsBtn.classList.add('active');
             } else {
-                toggleSpeedsLabel.textContent = 'Hide Speeds';
+                toggleSpeedsLabel.textContent = t('Hide Speeds');
                 toggleSpeedsBtn.classList.remove('active');
             }
             updateSegmentVisibility();
@@ -1020,12 +1237,11 @@ function initNavHandlers() {
 
     document.getElementById('nav-routes').addEventListener('click', () => {
         closeMobileMenu();
-        tripPlannerDrawer.style.display = 'flex';
-        bringOverlayToFront(tripPlannerDrawer);
+        openTripPlanner();
     });
 
     document.getElementById('close-trip-planner-drawer').addEventListener('click', () => {
-        tripPlannerDrawer.style.display = 'none';
+        closeOverlay('trip-planner-drawer');
     });
 
     document.getElementById('find-routes-btn').addEventListener('click', () => {
@@ -1068,7 +1284,7 @@ function initNavHandlers() {
     [noticesModal, activeTrainsModal, dashboardModal, delaysStreamModal].forEach(modal => {
         modal.addEventListener('click', (e) => {
             if (e.target === modal) {
-                modal.style.display = 'none';
+                closeOverlay(modal.id);
             }
         });
     });
@@ -1083,7 +1299,74 @@ function initNavHandlers() {
         }
     });
 
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        // Inputs use Escape to close their own suggestion lists.
+        if (e.target.closest && e.target.closest('input, select, textarea')) return;
+        if (leftSidebar && leftSidebar.classList.contains('mobile-open')) {
+            leftSidebar.classList.remove('mobile-open');
+            return;
+        }
+        if (openMapPopup) {
+            map.closePopup();
+            return;
+        }
+        const top = topOpenOverlay();
+        if (top) closeOverlay(top);
+    });
+
+    initDrawerSwipeToClose();
     initDelaysSSEStream();
+
+    // Hidden tabs don't need the live delay stream (the map animation already stops).
+    // The selected train's 30 s poll keeps running: it drives the browser notifications.
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            if (evtSource) {
+                evtSource.close();
+                evtSource = null;
+            }
+            return;
+        }
+        initDelaysSSEStream();
+        if (isRealtime) {
+            lastFetchTime = performance.now();
+            fetchActiveTrains();
+        }
+    });
+}
+
+// On touch screens the trip planner can be dragged down by its header to close it.
+function initDrawerSwipeToClose() {
+    const drawer = document.getElementById('trip-planner-drawer');
+    const handle = drawer && drawer.querySelector('.drawer-header');
+    if (!handle) return;
+
+    let startY = null;
+    let dy = 0;
+    handle.addEventListener('touchstart', (e) => {
+        if (e.target.closest('button')) return;
+        startY = e.touches[0].clientY;
+        dy = 0;
+        drawer.style.transition = 'none';
+    }, { passive: true });
+    handle.addEventListener('touchmove', (e) => {
+        if (startY === null) return;
+        dy = Math.max(0, e.touches[0].clientY - startY);
+        drawer.style.transform = `translateY(${dy}px)`;
+    }, { passive: true });
+    handle.addEventListener('touchend', () => {
+        if (startY === null) return;
+        startY = null;
+        drawer.style.transition = '';
+        if (dy > Math.min(120, drawer.offsetHeight * 0.25)) {
+            closeOverlay('trip-planner-drawer');
+            // Reset after it is hidden so it reopens in place.
+            setTimeout(() => { drawer.style.transform = ''; }, 50);
+        } else {
+            drawer.style.transform = '';
+        }
+    });
 }
 
 function initDelaysSSEStream() {
@@ -1120,7 +1403,7 @@ function initDelaysSSEStream() {
         const badge = document.getElementById('stream-status-badge');
         if (badge) {
             badge.style.background = '#ef4444';
-            badge.textContent = 'RECONNECTING';
+            badge.textContent = t('RECONNECTING');
         }
     };
 
@@ -1137,6 +1420,7 @@ function openDelaysStreamModal() {
     const modal = document.getElementById('delays-stream-modal');
     modal.style.display = 'flex';
     bringOverlayToFront(modal);
+    pushOverlayState('delays-stream-modal', '#live-delays');
 }
 
 function appendStreamLog(data) {
@@ -1148,16 +1432,16 @@ function appendStreamLog(data) {
     div.style.borderBottom = '1px solid #161b22';
     div.style.paddingBottom = '4px';
 
-    const time = escapeHTML(data.timestamp || new Date().toLocaleTimeString());
+    const time = escapeHTML(data.timestamp || formatSecondsToTime(getCurrentSecondsOfDay()));
 
     if (data.type === 'connected') {
-        div.innerHTML = `<span style="color: #10b981;">[${time}]</span> <strong style="color: #58a6ff;">SYSTEM:</strong> ${escapeHTML(data.message)}`;
+        div.innerHTML = `<span class="text-ok">[${time}]</span> <strong style="color: #58a6ff;">SYSTEM:</strong> ${escapeHTML(data.message)}`;
     } else if (data.type === 'delay_update') {
         const delayMins = data.delay_minutes || 0;
         const delayColor = delayMins > 0 ? '#f85149' : '#3fb950';
-        div.innerHTML = `<span style="color: #8b949e;">[${time}]</span> <strong style="color: #e6edf3;">Train ${escapeHTML(data.train_number)}:</strong> Delay: <span style="color: ${delayColor}; font-weight: bold;">+${delayMins} min</span> | Status: <span style="color: #d2a8ff;">${escapeHTML(data.position_status || 'N/A')}</span> | Last: ${escapeHTML(data.last_station || 'N/A')}`;
+        div.innerHTML = `<span class="text-dim">[${time}]</span> <strong style="color: #e6edf3;">${t('Train')} ${escapeHTML(data.train_number)}:</strong> ${t('Delay')}: <span style="color: ${delayColor}; font-weight: bold;">+${delayMins} min</span> | ${t('Status')}: <span style="color: #d2a8ff;">${escapeHTML(data.position_status || 'N/A')}</span> | ${t('Last')}: ${escapeHTML(data.last_station || 'N/A')}`;
     } else {
-        div.innerHTML = `<span style="color: #8b949e;">[${time}]</span> ${escapeHTML(JSON.stringify(data))}`;
+        div.innerHTML = `<span class="text-dim">[${time}]</span> ${escapeHTML(JSON.stringify(data))}`;
     }
 
     logContainer.prepend(div);
@@ -1172,7 +1456,7 @@ function renderNoticesModalBody() {
     if (!body) return;
 
     if (!noticesData || noticesData.length === 0) {
-        body.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 20px;">No active traffic notices or track works reported.</p>';
+        body.innerHTML = `<p class="empty-state">${t('No active traffic notices or track works reported.')}</p>`;
         return;
     }
 
@@ -1180,26 +1464,26 @@ function renderNoticesModalBody() {
     noticesData.forEach(item => {
         let badgesHTML = '';
         if (item.is_bus_replacement) {
-            badgesHTML += `<span class="notice-badge notice-badge-bus">🚌 Bus replacement</span> `;
+            badgesHTML += `<span class="notice-badge notice-badge-bus">🚌 ${t('Bus replacement')}</span> `;
         }
         if (item.is_track_works) {
-            badgesHTML += `<span class="notice-badge notice-badge-works">🚧 Track works</span> `;
+            badgesHTML += `<span class="notice-badge notice-badge-works">🚧 ${t('Track works')}</span> `;
         }
 
         let datesHTML = '';
         if (item.dates_json && item.dates_json.length > 0) {
-            datesHTML = `<div style="font-size: 11px; color: #00e5ff; margin-bottom: 6px;">📅 Dates: ${item.dates_json.map(d => escapeHTML(d)).join(', ')}</div>`;
+            datesHTML = `<div class="notice-dates">📅 ${t('Dates')}: ${item.dates_json.map(d => escapeHTML(d)).join(', ')}</div>`;
         } else if (item.date_from || item.date_to) {
             // An open-ended notice ("do 12.12.") has no start date: it applies from now until date_to.
-            const fromLabel = item.date_from ? escapeHTML(item.date_from) : 'now';
-            datesHTML = `<div style="font-size: 11px; color: #00e5ff; margin-bottom: 6px;">📅 Date: ${fromLabel} ${item.date_to ? '➔ ' + escapeHTML(item.date_to) : ''}</div>`;
+            const fromLabel = item.date_from ? escapeHTML(item.date_from) : t('now');
+            datesHTML = `<div class="notice-dates">📅 ${t('Date')}: ${fromLabel} ${item.date_to ? '➔ ' + escapeHTML(item.date_to) : ''}</div>`;
         }
 
         let pdfHTML = '';
         if (item.pdf_urls && item.pdf_urls.length > 0) {
-            pdfHTML += `<div style="margin-top: 8px; font-size: 11px;">📄 Linked documents: `;
+            pdfHTML += `<div style="margin-top: 8px; font-size: 11px;">📄 ${t('Linked documents')}: `;
             item.pdf_urls.forEach((url, i) => {
-                pdfHTML += `<a href="${escapeHTML(url)}" target="_blank" rel="noopener" style="color: #00e5ff; margin-right: 8px; text-decoration: underline;">Schedule PDF ${i + 1}</a>`;
+                pdfHTML += `<a href="${escapeHTML(url)}" target="_blank" rel="noopener" style="color: #00e5ff; margin-right: 8px; text-decoration: underline;">${t('Schedule PDF')} ${i + 1}</a>`;
             });
             pdfHTML += `</div>`;
         }
@@ -1225,6 +1509,7 @@ function openNoticesModal(highlightNoticeId = null) {
     if (modal) {
         modal.style.display = 'flex';
         bringOverlayToFront(modal);
+        pushOverlayState('notices-modal', highlightNoticeId ? `#notices/${encodeURIComponent(highlightNoticeId)}` : '#notices');
         renderNoticesModalBody();
 
         if (highlightNoticeId) {
@@ -1255,34 +1540,34 @@ function openActiveTrainsModal() {
     });
 
     if (uniqueTrains.length === 0) {
-        rowsHTML = `<tr><td colspan="5" style="padding: 16px; text-align: center; color: #a0aec0;">No active trains at current time.</td></tr>`;
+        rowsHTML = `<tr><td colspan="5" class="empty-state">${t('No active trains at current time.')}</td></tr>`;
     } else {
         uniqueTrains.forEach(tr => {
             const delayStr = tr.delay_minutes > 0
-                ? `<span style="color: #ef4444; font-weight: bold;">+${tr.delay_minutes} min delay</span>`
-                : `<span style="color: #10b981; font-weight: bold;">On Time</span>`;
+                ? `<span class="text-bad text-strong">${t('+{m} min delay', { m: tr.delay_minutes })}</span>`
+                : `<span class="text-ok text-strong">${t('On Time')}</span>`;
 
             rowsHTML += `
-                <tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="active-train-row" data-train="${escapeHTML(tr.train_number)}">
-                    <td style="padding: 10px;"><strong>${escapeHTML(tr.train_number)}</strong></td>
-                    <td style="padding: 10px;">🚩 ${escapeHTML(tr.first_station_name || 'N/A')}</td>
-                    <td style="padding: 10px;">🏁 ${escapeHTML(tr.last_station_name || 'N/A')}</td>
-                    <td style="padding: 10px;">${escapeHTML(tr.prev_station_name)} ➔ ${escapeHTML(tr.next_station_name)} (${Math.round(tr.progress * 100)}%)</td>
-                    <td style="padding: 10px;">${delayStr}</td>
+                <tr class="clickable-row active-train-row" data-train="${escapeHTML(tr.train_number)}">
+                    <td><strong>${escapeHTML(tr.train_number)}</strong></td>
+                    <td>🚩 ${escapeHTML(tr.first_station_name || 'N/A')}</td>
+                    <td>🏁 ${escapeHTML(tr.last_station_name || 'N/A')}</td>
+                    <td>${escapeHTML(tr.prev_station_name)} ➔ ${escapeHTML(tr.next_station_name)} (${Math.round(tr.progress * 100)}%)</td>
+                    <td>${delayStr}</td>
                 </tr>
             `;
         });
     }
 
     body.innerHTML = `
-        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+        <table class="data-table large roomy">
             <thead>
-                <tr style="border-bottom: 2px solid #3a4250; text-align: left; color: #a0aec0;">
-                    <th style="padding: 8px;">Train Number</th>
-                    <th style="padding: 8px;">Origin</th>
-                    <th style="padding: 8px;">Destination</th>
-                    <th style="padding: 8px;">Current Segment</th>
-                    <th style="padding: 8px;">Delay Status</th>
+                <tr>
+                    <th>${t('Train Number')}</th>
+                    <th>${t('Origin')}</th>
+                    <th>${t('Destination')}</th>
+                    <th>${t('Current Segment')}</th>
+                    <th>${t('Delay Status')}</th>
                 </tr>
             </thead>
             <tbody>
@@ -1293,6 +1578,7 @@ function openActiveTrainsModal() {
 
     modal.style.display = 'flex';
     bringOverlayToFront(modal);
+    pushOverlayState('active-trains-modal', '#active-trains');
 
     body.querySelectorAll('.active-train-row').forEach(row => {
         row.addEventListener('click', () => {
@@ -1301,7 +1587,7 @@ function openActiveTrainsModal() {
             if (tr) {
                 map.setView([tr.lat, tr.lon], 11);
                 openTrainDetails(tr);
-                modal.style.display = 'none';
+                hideOverlay('active-trains-modal');
             }
         });
     });
@@ -1311,9 +1597,10 @@ async function openDashboardModal() {
     const modal = document.getElementById('dashboard-modal');
     const body = document.getElementById('dashboard-modal-body');
 
-    body.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 20px;">Loading live dashboard metrics...</p>';
+    body.innerHTML = `<p class="empty-state">${t('Loading live dashboard metrics...')}</p>`;
     modal.style.display = 'flex';
     bringOverlayToFront(modal);
+    pushOverlayState('dashboard-modal', '#dashboard');
 
     try {
         const resp = await fetch(`/api/dashboard?time=${formatSecondsToTime(currentTimeSec)}`);
@@ -1330,15 +1617,15 @@ async function openDashboardModal() {
 
             uniqueDelayed.forEach(tr => {
                 delayedRows += `
-                    <tr style="border-bottom: 1px solid #2a313d;">
-                        <td style="padding: 8px;"><strong>${escapeHTML(tr.train_number)}</strong></td>
-                        <td style="padding: 8px;">${escapeHTML(tr.first_station_name)} ➔ ${escapeHTML(tr.last_station_name)}</td>
-                        <td style="padding: 8px; color: #ef4444; font-weight: bold;">+${tr.delay_minutes} min</td>
+                    <tr>
+                        <td><strong>${escapeHTML(tr.train_number)}</strong></td>
+                        <td>${escapeHTML(tr.first_station_name)} ➔ ${escapeHTML(tr.last_station_name)}</td>
+                        <td class="text-bad text-strong">+${tr.delay_minutes} min</td>
                     </tr>
                 `;
             });
         } else {
-            delayedRows = `<tr><td colspan="3" style="padding: 12px; text-align: center; color: #10b981;">No delayed trains currently active! 🎉</td></tr>`;
+            delayedRows = `<tr><td colspan="3" class="empty-state text-ok">${t('No delayed trains currently active! 🎉')}</td></tr>`;
         }
 
         const tripsCount = stats.trips_running_today || stats.total_trips_today || 0;
@@ -1350,34 +1637,34 @@ async function openDashboardModal() {
         body.innerHTML = `
             <div class="dashboard-grid">
                 <div class="dash-card">
-                    <div class="dash-label">Active Trains</div>
+                    <div class="dash-label">${t('Active Trains')}</div>
                     <div class="dash-value">${stats.active_train_count}</div>
                 </div>
                 <div class="dash-card">
-                    <div class="dash-label">Delayed Trains</div>
+                    <div class="dash-label">${t('Delayed Trains')}</div>
                     <div class="dash-value" style="color: ${stats.delayed_train_count > 0 ? '#ef4444' : '#10b981'};">${stats.delayed_train_count}</div>
                 </div>
                 <div class="dash-card">
-                    <div class="dash-label">Average Delay</div>
+                    <div class="dash-label">${t('Average Delay')}</div>
                     <div class="dash-value" style="color: #f59e0b;">${stats.avg_delay_minutes.toFixed(1)} min</div>
                 </div>
                 <div class="dash-card">
-                    <div class="dash-label">Trips Running Today</div>
+                    <div class="dash-label">${t('Trips Running Today')}</div>
                     <div class="dash-value">${tripsCount}</div>
                 </div>
                 <div class="dash-card">
-                    <div class="dash-label">Delay API Calls (Total/Min)</div>
+                    <div class="dash-label">${t('Delay API Calls (Total/Min)')}</div>
                     <div class="dash-value" style="color: #00e5ff;">${dsCalls} <span style="font-size: 14px; color: #a0aec0;">(${dsMin}/min)</span></div>
                 </div>
             </div>
 
-            <h3 style="margin-bottom: 10px; color: #fff; font-size: 16px;">⚠️ Currently Delayed Trains</h3>
-            <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+            <h3 class="dash-section-title">⚠️ ${t('Currently Delayed Trains')}</h3>
+            <table class="data-table">
                 <thead>
-                    <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
-                        <th style="padding: 6px;">Train</th>
-                        <th style="padding: 6px;">Route</th>
-                        <th style="padding: 6px;">Delay</th>
+                    <tr>
+                        <th>${t('Train')}</th>
+                        <th>${t('Route')}</th>
+                        <th>${t('Delay')}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1386,7 +1673,7 @@ async function openDashboardModal() {
             </table>
         `;
     } catch (e) {
-        body.innerHTML = `<p style="color: #ef4444; padding: 20px;">Failed to load dashboard statistics: ${escapeHTML(e.message)}</p>`;
+        body.innerHTML = `<p class="error-state">${t('Failed to load dashboard statistics')}: ${escapeHTML(e.message)}</p>`;
     }
 }
 
@@ -1441,7 +1728,7 @@ function setupStationAutocomplete(inputId, idInputId, resultsId) {
 
         resultsEl.innerHTML = '';
         if (matches.length === 0) {
-            resultsEl.innerHTML = '<div class="search-item" style="color: #a0aec0; cursor: default;">No stations found</div>';
+            resultsEl.innerHTML = `<div class="search-item search-item-empty">${t('No stations found')}</div>`;
             resultsEl.style.display = 'block';
             return;
         }
@@ -1502,51 +1789,105 @@ function setupStationAutocomplete(inputId, idInputId, resultsId) {
     });
 }
 
-function fillOriginFromGeolocation() {
-    const btn = document.getElementById('route-from-locate-btn');
+function findNearestStation(lat, lon) {
+    let nearest = null;
+    let nearestDist = Infinity;
+    stationsData.forEach(st => {
+        const d = haversineKm(lat, lon, st.lat, st.lon);
+        if (d < nearestDist) {
+            nearestDist = d;
+            nearest = st;
+        }
+    });
+    return nearest ? { station: nearest, distanceKm: nearestDist } : null;
+}
+
+// Resolves with the viewer's position, reporting failures as toasts. btn shows a busy state meanwhile.
+function locateUser(btn, onLocated) {
     if (!('geolocation' in navigator)) {
-        showToast('📍 Location unavailable', 'Your browser does not support geolocation.');
+        showToast(t('📍 Location unavailable'), t('Your browser does not support geolocation.'));
         return;
     }
     if (stationsData.length === 0) {
-        showToast('📍 Stations not loaded', 'Station list is still loading, please try again in a moment.');
+        showToast(t('📍 Stations not loaded'), t('Station list is still loading, please try again in a moment.'));
         return;
     }
 
-    btn.disabled = true;
-    btn.classList.add('loading');
+    const setBusy = (busy) => {
+        if (!btn) return;
+        btn.disabled = busy;
+        btn.classList.toggle('loading', busy);
+    };
+    setBusy(true);
     navigator.geolocation.getCurrentPosition((pos) => {
-        btn.disabled = false;
-        btn.classList.remove('loading');
-        const { latitude, longitude } = pos.coords;
+        setBusy(false);
+        onLocated(pos.coords);
+    }, (err) => {
+        setBusy(false);
+        const msg = err.code === err.PERMISSION_DENIED
+            ? t('Location access was denied. Allow location for this site to use this feature.')
+            : t('Could not determine your location.');
+        showToast(t('📍 Location error'), msg);
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+}
 
-        let nearest = null;
-        let nearestDist = Infinity;
-        stationsData.forEach(st => {
-            const d = haversineKm(latitude, longitude, st.lat, st.lon);
-            if (d < nearestDist) {
-                nearestDist = d;
-                nearest = st;
-            }
-        });
-        if (!nearest) return;
+function fillOriginFromGeolocation() {
+    locateUser(document.getElementById('route-from-locate-btn'), (coords) => {
+        const found = findNearestStation(coords.latitude, coords.longitude);
+        if (!found) return;
+        const nearest = found.station;
 
         document.getElementById('route-from-input').value = nearest.stop_name;
         document.getElementById('route-from-id').value = nearest.stop_id;
-        showToast('📍 Nearest station', `${nearest.stop_name} (${nearestDist.toFixed(1)} km away)`);
+        showToast(t('📍 Nearest station'), t('{name} ({km} km away)', { name: nearest.stop_name, km: found.distanceKm.toFixed(1) }));
 
         if (document.getElementById('route-to-id').value) {
             findRoutePlans();
         }
-    }, (err) => {
-        btn.disabled = false;
-        btn.classList.remove('loading');
-        const msg = err.code === err.PERMISSION_DENIED
-            ? 'Location access was denied. Allow location for this site to use this feature.'
-            : 'Could not determine your location.';
-        showToast('📍 Location error', msg);
-    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+    });
 }
+
+let userLocationLayer = null;
+
+// Map button: show where the viewer is and open the nearest station's timetable.
+function showUserLocationOnMap(btn) {
+    locateUser(btn, (coords) => {
+        const latlng = [coords.latitude, coords.longitude];
+        if (userLocationLayer) map.removeLayer(userLocationLayer);
+        userLocationLayer = L.layerGroup([
+            L.circle(latlng, { radius: coords.accuracy, color: '#3b82f6', weight: 1, fillOpacity: 0.12, interactive: false }),
+            L.circleMarker(latlng, { radius: 7, color: '#ffffff', weight: 2, fillColor: '#3b82f6', fillOpacity: 1, interactive: false }),
+        ]).addTo(map);
+
+        const found = findNearestStation(coords.latitude, coords.longitude);
+        if (!found) {
+            map.setView(latlng, 13);
+            return;
+        }
+        map.fitBounds(L.latLngBounds([latlng, [found.station.lat, found.station.lon]]), { padding: [60, 60], maxZoom: 14 });
+        openStationTimetable(found.station);
+        showToast(t('📍 Nearest station'), t('{name} ({km} km away)', { name: found.station.stop_name, km: found.distanceKm.toFixed(1) }));
+    });
+}
+
+const LocateControl = L.Control.extend({
+    options: { position: 'topleft' },
+    onAdd() {
+        const container = L.DomUtil.create('div', 'leaflet-bar');
+        const btn = L.DomUtil.create('a', 'map-locate-btn', container);
+        btn.href = '#';
+        btn.title = t('Show my location and nearest station');
+        btn.setAttribute('role', 'button');
+        btn.setAttribute('aria-label', t('Show my location and nearest station'));
+        btn.textContent = '📍';
+        L.DomEvent.disableClickPropagation(container);
+        L.DomEvent.on(btn, 'click', (e) => {
+            L.DomEvent.preventDefault(e);
+            if (!btn.classList.contains('loading')) showUserLocationOnMap(btn);
+        });
+        return container;
+    },
+});
 
 function renderRecentPairs() {
     const container = document.getElementById('recent-pairs-container');
@@ -1611,30 +1952,31 @@ async function findRoutePlans() {
     }
 
     if (!fromId || !toId) {
-        resultsContainer.innerHTML = '<p style="text-align: center; color: #ef4444; padding: 10px;">Please select valid origin and destination stations.</p>';
+        resultsContainer.innerHTML = `<p class="error-state compact">${t('Please select valid origin and destination stations.')}</p>`;
         return;
     }
 
     const fromName = fromInput.value.trim();
     const toName = toInput.value.trim();
     saveRecentPair(fromId, fromName, toId, toName);
+    updateOverlayHash('trip-planner-drawer', `#planner/${encodeURIComponent(fromId)}/${encodeURIComponent(toId)}`);
 
-    resultsContainer.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 10px;">Searching routes...</p>';
+    resultsContainer.innerHTML = `<p class="empty-state compact">${t('Searching routes...')}</p>`;
 
     try {
         const resp = await fetch(`/api/routes/plan?from=${fromId}&to=${toId}&time=${Math.floor(currentTimeSec)}`);
         const routes = await resp.json();
 
         if (routes.length === 0) {
-            resultsContainer.innerHTML = '<p style="text-align: center; color: #a0aec0; padding: 10px;">No direct or 1-transfer scheduled trains found for this route.</p>';
+            resultsContainer.innerHTML = `<p class="empty-state compact">${t('No direct or 1-transfer scheduled trains found for this route.')}</p>`;
             return;
         }
 
         let rowsHTML = '';
         routes.forEach(r => {
             const delayStr = r.delay_minutes > 0
-                ? `<span style="color: #ef4444; font-weight: bold;">+${r.delay_minutes} min delay</span>`
-                : `<span style="color: #10b981;">On Time</span>`;
+                ? `<span class="text-bad text-strong">${t('+{m} min delay', { m: r.delay_minutes })}</span>`
+                : `<span class="text-ok">${t('On Time')}</span>`;
 
             const isNext = r.is_nearest_future;
             const rowClass = isNext ? 'route-plan-row next-departure-row' : 'route-plan-row';
@@ -1642,20 +1984,20 @@ async function findRoutePlans() {
                 ? 'background: rgba(0, 102, 204, 0.25); border-left: 4px solid #00e5ff; border-bottom: 1px solid #2a313d;'
                 : 'border-bottom: 1px solid #2a313d;';
 
-            const badgeStr = isNext ? '<span style="background: #00e5ff; color: #0f1217; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-left: 6px;">NEXT DEPARTURE</span>' : '';
-            const transferBadge = r.is_transfer ? `<span style="background: #f59e0b; color: #0f1217; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-left: 4px;">1 TRANSFER (${escapeHTML(r.transfer_station_name)})</span>` : '';
+            const badgeStr = isNext ? `<span style="background: #00e5ff; color: #0f1217; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-left: 6px;">${t('NEXT DEPARTURE')}</span>` : '';
+            const transferBadge = r.is_transfer ? `<span style="background: #f59e0b; color: #0f1217; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-left: 4px;">${t('1 TRANSFER')} (${escapeHTML(r.transfer_station_name)})</span>` : '';
 
             let disruptionBadgesHTML = '';
             if (r.is_bus_replacement) {
-                disruptionBadgesHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(r.notice_id || '')}" style="font-size: 9px; padding: 1px 4px; margin-left: 4px;">🚌 Bus</span> `;
+                disruptionBadgesHTML += `<span class="notice-badge compact notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(r.notice_id || '')}" style="margin-left: 4px;">🚌 ${t('Bus')}</span> `;
             }
             if (r.is_track_works) {
-                disruptionBadgesHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(r.notice_id || '')}" style="font-size: 9px; padding: 1px 4px; margin-left: 4px;">🚧 Works</span>`;
+                disruptionBadgesHTML += `<span class="notice-badge compact notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(r.notice_id || '')}" style="margin-left: 4px;">🚧 ${t('Works')}</span>`;
             }
 
             let disruptionNoticeHTML = '';
             if (r.affected_by_disruption) {
-                disruptionNoticeHTML = `<div style="font-size: 11px; color: #f59e0b; margin-top: 4px;">⚠️ <strong>Disruption Notice:</strong> ${escapeHTML(r.disruption_notice || 'Track works or bus replacement on route')}</div>`;
+                disruptionNoticeHTML = `<div style="font-size: 11px; color: #f59e0b; margin-top: 4px;">⚠️ <strong>${t('Disruption Notice')}:</strong> ${escapeHTML(r.disruption_notice || t('Track works or bus replacement on route'))}</div>`;
             }
 
             const depTimeHM = stripSeconds(r.departure_time);
@@ -1663,9 +2005,9 @@ async function findRoutePlans() {
 
             rowsHTML += `
                 <tr style="${rowStyle}" class="${rowClass}">
-                    <td style="padding: 10px;">🕒 ${depTimeHM} ➔ ${arrTimeHM} <span style="color: #a0aec0; font-size: 11px;">(${r.duration_minutes} min)</span></td>
-                    <td style="padding: 10px;"><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">${escapeHTML(r.train_number)}</a> ${disruptionBadgesHTML}${badgeStr}${transferBadge}${disruptionNoticeHTML}</td>
-                    <td style="padding: 10px;">${delayStr}</td>
+                    <td>🕒 ${depTimeHM} ➔ ${arrTimeHM} <span class="route-duration">(${r.duration_minutes} min)</span></td>
+                    <td><a href="#" class="train-link" data-train="${escapeHTML(r.train_number)}" style="color: #00e5ff; font-weight: bold; text-decoration: underline;">${escapeHTML(r.train_number)}</a> ${disruptionBadgesHTML}${badgeStr}${transferBadge}${disruptionNoticeHTML}</td>
+                    <td>${delayStr}</td>
                 </tr>
             `;
         });
@@ -1673,16 +2015,16 @@ async function findRoutePlans() {
         const headerRouteTitle = `🚩 ${escapeHTML(fromName)} ➔ 🏁 ${escapeHTML(toName)}`;
 
         resultsContainer.innerHTML = `
-            <div style="background: #1e242e; border: 1px solid #3a4250; border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; font-weight: bold; font-size: 14px; color: #00e5ff;">
+            <div class="route-results-header">
                 ${headerRouteTitle}
             </div>
-            <div style="max-height: 280px; overflow-y: auto;">
-                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+            <div class="route-results-scroll">
+                <table class="data-table roomy">
                     <thead>
-                        <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
-                            <th style="padding: 8px;">Departure ➔ Arrival</th>
-                            <th style="padding: 8px;">Train</th>
-                            <th style="padding: 8px;">Status</th>
+                        <tr>
+                            <th>${t('Departure ➔ Arrival')}</th>
+                            <th>${t('Train')}</th>
+                            <th>${t('Status')}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1706,7 +2048,7 @@ async function findRoutePlans() {
         });
 
     } catch (e) {
-        resultsContainer.innerHTML = `<p style="color: #ef4444; padding: 10px;">Failed to fetch route plans: ${escapeHTML(e.message)}</p>`;
+        resultsContainer.innerHTML = `<p class="error-state compact">${t('Failed to fetch route plans')}: ${escapeHTML(e.message)}</p>`;
     }
 }
 
@@ -1766,6 +2108,7 @@ async function loadStations() {
         const resp = await fetch('/api/stations');
         stationsData = await resp.json();
         renderStations();
+        applyInitialHashRoute();
         fetchActiveTrains();
     } catch (e) {
         console.error('Failed to load stations:', e);
@@ -1897,9 +2240,9 @@ async function openSegmentDetails(seg) {
     const popup = L.popup(mapPopupOptions())
         .setLatLng([midLat, midLon])
         .setContent(`
-            <div style="width: min(300px, calc(100vw - 80px)); padding: 10px;">
-                <h3 style="margin-bottom: 4px; color: #3b82f6;">📍 ${escapeHTML(seg.from_stop_name)} ➔ ${escapeHTML(seg.to_stop_name)}</h3>
-                <p style="color: #a0aec0; font-size: 12px;"><em>Loading scheduled train details...</em></p>
+            <div class="map-popup">
+                <h3 class="map-popup-title">📍 ${escapeHTML(seg.from_stop_name)} ➔ ${escapeHTML(seg.to_stop_name)}</h3>
+                <p class="popup-loading"><em>${t('Loading scheduled train details...')}</em></p>
             </div>
         `)
         .openOn(map);
@@ -1914,29 +2257,29 @@ async function openSegmentDetails(seg) {
                 const depTime = formatSecondsToTime(tr.scheduled_dep_sec);
                 const arrTime = formatSecondsToTime(tr.scheduled_arr_sec);
                 trainRowsHTML += `
-                    <tr style="border-bottom: 1px solid #2a313d;">
-                        <td style="padding: 6px 4px;"><strong>${escapeHTML(tr.train_number)}</strong></td>
-                        <td style="padding: 6px 4px;">${depTime} - ${arrTime}</td>
-                        <td style="padding: 6px 4px; color: #10b981; font-weight: bold;">${Math.round(tr.speed_kmh)} km/h</td>
+                    <tr>
+                        <td><strong>${escapeHTML(tr.train_number)}</strong></td>
+                        <td>${depTime} - ${arrTime}</td>
+                        <td class="text-ok text-strong">${Math.round(tr.speed_kmh)} km/h</td>
                     </tr>
                 `;
             });
         } else {
-            trainRowsHTML = `<tr><td colspan="3" style="padding: 8px; text-align: center; color: #a0aec0;">No train data for segment.</td></tr>`;
+            trainRowsHTML = `<tr><td colspan="3" class="empty-state compact">${t('No train data for segment.')}</td></tr>`;
         }
 
         const popupHTML = `
-            <div style="max-height: 280px; overflow-y: auto; width: min(300px, calc(100vw - 80px));">
-                <h3 style="margin-bottom: 4px; color: #3b82f6;">📍 ${escapeHTML(seg.from_stop_name)} ➔ ${escapeHTML(seg.to_stop_name)}</h3>
-                <div style="font-size: 12px; color: #a0aec0; margin-bottom: 10px;">
-                    Distance: <strong>${seg.distance_km.toFixed(1)} km</strong> | Avg Speed: <strong style="color: #10b981;">${Math.round(seg.avg_speed_kmh)} km/h</strong> (${seg.train_count} trains)
+            <div class="map-popup flush map-popup-scroll">
+                <h3 class="map-popup-title">📍 ${escapeHTML(seg.from_stop_name)} ➔ ${escapeHTML(seg.to_stop_name)}</h3>
+                <div class="popup-summary">
+                    ${t('Distance')}: <strong>${seg.distance_km.toFixed(1)} km</strong> | ${t('Avg Speed')}: <strong class="text-ok">${Math.round(seg.avg_speed_kmh)} km/h</strong> (${t('{n} trains', { n: seg.train_count })})
                 </div>
-                <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                <table class="data-table small">
                     <thead>
-                        <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
-                            <th style="padding: 4px;">Train</th>
-                            <th style="padding: 4px;">Dep - Arr</th>
-                            <th style="padding: 4px;">Speed</th>
+                        <tr>
+                            <th>${t('Train')}</th>
+                            <th>${t('Dep - Arr')}</th>
+                            <th>${t('Speed')}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1949,8 +2292,8 @@ async function openSegmentDetails(seg) {
         popup.setContent(popupHTML);
     } catch (e) {
         popup.setContent(`
-            <div style="width: min(300px, calc(100vw - 80px)); padding: 10px; color: #ef4444;">
-                Failed to load segment details: ${escapeHTML(e.message)}
+            <div class="map-popup text-bad">
+                ${t('Failed to load segment details')}: ${escapeHTML(e.message)}
             </div>
         `);
     }
@@ -2007,15 +2350,15 @@ async function openStationTimetable(station) {
         const resp = await fetch(`/api/stations/${encodeURIComponent(station.stop_id)}/timetable`);
         const entries = await resp.json();
 
-        let timetableHTML = `<div style="max-height: 280px; overflow-y: auto; width: min(340px, calc(100vw - 80px));" class="timetable-popup-container">
-            <h3 style="margin-bottom: 8px; color: #00e5ff;">🚉 ${escapeHTML(station.stop_name)}</h3>
-            <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+        let timetableHTML = `<div class="map-popup wide map-popup-scroll timetable-popup-container">
+            <h3 class="map-popup-title station">🚉 ${escapeHTML(station.stop_name)}</h3>
+            <table class="data-table">
                 <thead>
-                    <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #a0aec0;">
-                        <th style="padding: 4px;">Departure</th>
-                        <th style="padding: 4px;">Train</th>
-                        <th style="padding: 4px;">Destination</th>
-                        <th style="padding: 4px;">Status</th>
+                    <tr>
+                        <th>${t('Departure')}</th>
+                        <th>${t('Train')}</th>
+                        <th>${t('Destination')}</th>
+                        <th>${t('Status')}</th>
                     </tr>
                 </thead>
                 <tbody>`;
@@ -2023,28 +2366,28 @@ async function openStationTimetable(station) {
         const nearestIdx = findNearestTimetableEntryIndex(entries, currentTimeSec);
 
         if (entries.length === 0) {
-            timetableHTML += `<tr><td colspan="4" style="padding: 8px; text-align: center; color: #a0aec0;">No scheduled trains found.</td></tr>`;
+            timetableHTML += `<tr><td colspan="4" class="empty-state compact">${t('No scheduled trains found.')}</td></tr>`;
         } else {
             entries.forEach((e, idx) => {
                 const delayVal = typeof e.delay_minutes === 'number' ? e.delay_minutes : 0;
-                const delayStr = delayVal > 0 ? `<span style="color: #ef4444;">+${delayVal}m</span>` : `<span style="color: #10b981;">On Time</span>`;
+                const delayStr = delayVal > 0 ? `<span class="text-bad">+${delayVal}m</span>` : `<span class="text-ok">${t('On Time')}</span>`;
                 const dest = e.destination_station_name || e.headsign || 'N/A';
                 const depHM = stripSeconds(e.departure_time);
 
                 let badgesHTML = '';
                 if (e.is_bus_replacement) {
-                    badgesHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(e.notice_id || '')}" style="font-size: 9px; padding: 1px 4px;">🚌 Bus</span> `;
+                    badgesHTML += `<span class="notice-badge compact notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(e.notice_id || '')}">🚌 ${t('Bus')}</span> `;
                 }
                 if (e.is_track_works) {
-                    badgesHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(e.notice_id || '')}" style="font-size: 9px; padding: 1px 4px;">🚧 Works</span>`;
+                    badgesHTML += `<span class="notice-badge compact notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(e.notice_id || '')}">🚧 ${t('Works')}</span>`;
                 }
 
                 const rowClass = idx === nearestIdx ? 'timetable-row timetable-nearest-row' : 'timetable-row';
-                timetableHTML += `<tr style="border-bottom: 1px solid #2a313d; cursor: pointer;" class="${rowClass}" data-train="${escapeHTML(e.train_number)}">
-                    <td style="padding: 6px 4px;">🕒 ${depHM}</td>
-                    <td style="padding: 6px 4px;"><strong>${escapeHTML(e.train_number)}</strong> ${badgesHTML}</td>
-                    <td style="padding: 6px 4px; color: #e2e8f0; font-weight: 500;">🏁 ${escapeHTML(dest)}</td>
-                    <td style="padding: 6px 4px;">${delayStr}</td>
+                timetableHTML += `<tr class="clickable-row ${rowClass}" data-train="${escapeHTML(e.train_number)}">
+                    <td>🕒 ${depHM}</td>
+                    <td><strong>${escapeHTML(e.train_number)}</strong> ${badgesHTML}</td>
+                    <td class="dest-cell">🏁 ${escapeHTML(dest)}</td>
+                    <td>${delayStr}</td>
                 </tr>`;
             });
         }
@@ -2055,6 +2398,8 @@ async function openStationTimetable(station) {
             .setLatLng([station.lat, station.lon])
             .setContent(timetableHTML)
             .openOn(map);
+        popup.isStationTimetable = true;
+        replaceUrlHash(`#station/${encodeURIComponent(station.stop_id)}`);
 
         // openOn() adds the popup synchronously, so its DOM is ready here.
         const popupNode = popup.getElement();
@@ -2092,6 +2437,18 @@ async function fetchActiveTrains() {
         activeTrainsData = data;
         updateTrainMarkers();
         updateOpenTrainDetailsIfActive();
+        if (activeTrainsModalAwaitingData) {
+            // Opened from a link before the first train data arrived: render it now.
+            activeTrainsModalAwaitingData = false;
+            if (isOverlayOpen('active-trains-modal')) {
+                applyingHashRoute = true;
+                try {
+                    openActiveTrainsModal();
+                } finally {
+                    applyingHashRoute = false;
+                }
+            }
+        }
         if (!startupRouteHandled) {
             checkStartupRouteSelection();
         }
@@ -2118,7 +2475,7 @@ function locateTrainOnMap(trNum) {
     const train = activeTrainsData.find(t => t.train_number === trNum || t.trip_id === trNum);
     const marker = train && trainMarkersMap[train.trip_id];
     if (!marker) {
-        showToast(`🚆 Train ${trNum}`, 'This train is not running on the map right now.');
+        showToast(`🚆 ${t('Train')} ${trNum}`, t('This train is not running on the map right now.'));
         return;
     }
 
@@ -2143,6 +2500,7 @@ function openTrainDetails(train) {
     const trNum = train.train_number || train.trip_id;
     currentOpenedTrainNum = trNum;
     selectedTrainNum = trNum;
+    pushOverlayState('side-panel', `#train/${encodeURIComponent(trNum)}`);
 
     clearSelectedStationHighlight();
 
@@ -2168,18 +2526,18 @@ async function fetchAndDisplayTrainDetails(trainNum) {
     const titleEl = document.getElementById('side-panel-title');
     const badgeEl = document.getElementById('side-panel-badge');
 
-    if (titleEl) titleEl.textContent = `🚆 Train ${trainNum}`;
+    if (titleEl) titleEl.textContent = `🚆 ${t('Train')} ${trainNum}`;
     if (badgeEl) badgeEl.innerHTML = '';
     showLocateTrainButton();
 
     panel.style.display = 'block';
     bringOverlayToFront(panel);
-    content.innerHTML = `<p style="color: #a0aec0; text-align: center; padding: 20px;">Loading details for Train ${escapeHTML(trainNum)}...</p>`;
+    content.innerHTML = `<p class="empty-state">${t('Loading details for train {n}...', { n: escapeHTML(trainNum) })}</p>`;
 
     try {
         const resp = await fetch(`/api/trains/${encodeURIComponent(trainNum)}`);
         if (!resp.ok) {
-            content.innerHTML = `<p style="color: #ef4444; text-align: center; padding: 20px;">Train ${escapeHTML(trainNum)} not found.</p>`;
+            content.innerHTML = `<p class="error-state">${t('Train {n} not found.', { n: escapeHTML(trainNum) })}</p>`;
             return;
         }
 
@@ -2191,42 +2549,42 @@ async function fetchAndDisplayTrainDetails(trainNum) {
             trainRecentDelays[data.train_number] = data.recent_delays;
         }
 
-        let statusStr = "Scheduled Train";
+        let statusStr = t('Scheduled Train');
         let statusBadgeClass = "badge-on-time";
 
         let disruptionBadgeHTML = '';
         if (data.is_bus_replacement) {
-            disruptionBadgeHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(data.notice_id || '')}" style="margin-left: 6px;">🚌 Bus replacement</span>`;
+            disruptionBadgeHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(data.notice_id || '')}" style="margin-left: 6px;">🚌 ${t('Bus replacement')}</span>`;
         }
         if (data.is_track_works) {
-            disruptionBadgeHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(data.notice_id || '')}" style="margin-left: 6px;">🚧 Track works</span>`;
+            disruptionBadgeHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(data.notice_id || '')}" style="margin-left: 6px;">🚧 ${t('Track works')}</span>`;
         }
 
         if (data.is_active) {
-            statusStr = "Currently Active on Route";
+            statusStr = t('Currently Active on Route');
             statusBadgeClass = "badge-on-time";
         } else if (data.position_status && data.position_status.toLowerCase() === "arrived") {
-            statusStr = "Completed Journey";
+            statusStr = t('Completed Journey');
             statusBadgeClass = "badge-on-time";
         } else {
             const depSec = data.first_departure_seconds;
             const arrSec = data.last_arrival_seconds;
             if (currentTimeSec < depSec) {
                 const depHM = stripSeconds(data.first_departure_time);
-                statusStr = `Scheduled (Departs at ${depHM})`;
+                statusStr = t('Scheduled (Departs at {time})', { time: depHM });
             } else if (currentTimeSec > arrSec) {
                 const arrHM = stripSeconds(data.last_arrival_time);
-                statusStr = `Completed (Arrived at ${arrHM})`;
+                statusStr = t('Completed (Arrived at {time})', { time: arrHM });
             } else {
-                statusStr = "Not running at selected time";
+                statusStr = t('Not running at selected time');
             }
         }
 
         const delayBadge = data.delay_minutes > 0
-            ? `<span class="badge badge-delay">+${data.delay_minutes} min delay</span>`
+            ? `<span class="badge badge-delay">${t('+{m} min delay', { m: data.delay_minutes })}</span>`
             : `<span class="badge ${statusBadgeClass}">${escapeHTML(statusStr)}</span>`;
 
-        if (titleEl) titleEl.textContent = `🚆 Train ${data.train_number}`;
+        if (titleEl) titleEl.textContent = `🚆 ${t('Train')} ${data.train_number}`;
         if (badgeEl) badgeEl.innerHTML = delayBadge + disruptionBadgeHTML;
 
         const firstTimeStr = data.first_departure_time ? ` (${stripSeconds(data.first_departure_time)})` : '';
@@ -2234,29 +2592,29 @@ async function fetchAndDisplayTrainDetails(trainNum) {
 
         content.innerHTML = `
             <div class="detail-row">
-                <div class="detail-label">First Station (Origin)</div>
+                <div class="detail-label">${t('First Station (Origin)')}</div>
                 <div class="detail-value">🚩 ${escapeHTML(data.first_station_name)}${firstTimeStr}</div>
             </div>
             <div class="detail-row">
-                <div class="detail-label">Last Station (Destination)</div>
+                <div class="detail-label">${t('Last Station (Destination)')}</div>
                 <div class="detail-value">🏁 ${escapeHTML(data.last_station_name)}${lastTimeStr}</div>
             </div>
             <div class="detail-row">
-                <div class="detail-label">Scheduled Journey Time</div>
+                <div class="detail-label">${t('Scheduled Journey Time')}</div>
                 <div class="detail-value">🕒 ${stripSeconds(data.first_departure_time)} ➔ ${stripSeconds(data.last_arrival_time)}</div>
             </div>
             <div class="detail-row">
-                <div class="detail-label">Current Status</div>
+                <div class="detail-label">${t('Current Status')}</div>
                 <div class="detail-value" style="color: ${data.is_active ? '#10b981' : '#a0aec0'}; font-weight: bold;">
                     ${escapeHTML(statusStr)}
                 </div>
             </div>
             <div class="detail-row">
-                <div class="detail-label">Delay Status</div>
-                <div class="detail-value">${data.delay_minutes > 0 ? `<span style="color:#ef4444; font-weight:bold;">Running with +${data.delay_minutes} min delay</span>` : '<span style="color:#10b981; font-weight:bold;">On Time / No Delay</span>'}</div>
+                <div class="detail-label">${t('Delay Status')}</div>
+                <div class="detail-value">${data.delay_minutes > 0 ? `<span class="text-bad text-strong">${t('Running with +{m} min delay', { m: data.delay_minutes })}</span>` : `<span class="text-ok text-strong">${t('On Time / No Delay')}</span>`}</div>
             </div>
-            <button class="refresh-delay-btn" id="check-delay-btn">📡 Refresh Live Delay Status</button>
-            <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;"></div>
+            <button class="refresh-delay-btn" id="check-delay-btn">📡 ${t('Refresh Live Delay Status')}</button>
+            <div id="live-delay-result" class="live-delay-result"></div>
             <div id="delay-distribution-section">${renderDelayDistributionHTML(data.delay_distribution)}</div>
             <div id="recent-delays-section">${renderRecentDelaysHTML(data.recent_delays)}</div>
         `;
@@ -2267,33 +2625,33 @@ async function fetchAndDisplayTrainDetails(trainNum) {
 
         document.getElementById('check-delay-btn').addEventListener('click', async () => {
             const resultDiv = document.getElementById('live-delay-result');
-            resultDiv.innerHTML = '<em>Fetching live status from hzpp.app...</em>';
+            resultDiv.innerHTML = `<em>${t('Fetching live status from hzpp.app...')}</em>`;
             try {
                 const resp = await fetch(`/api/train-delay?trainId=${encodeURIComponent(data.train_number)}`);
                 const liveData = await resp.json();
                 if (liveData.success && liveData.data) {
                     const live = liveData.data;
                     const liveDelayMins = live.delayMinutes || 0;
-                    const liveDelayStr = liveDelayMins > 0 ? `+${liveDelayMins} min` : 'On Time / No Delay';
+                    const liveDelayStr = liveDelayMins > 0 ? `+${liveDelayMins} min` : t('On Time / No Delay');
 
                     resultDiv.innerHTML = `
-                        <div style="background: #1e242e; padding: 10px; border-radius: 6px; border: 1px solid #3a4250;">
-                            <div><strong>Status:</strong> ${escapeHTML(live.positionStatus || 'Unknown')}</div>
-                            <div><strong>Live Delay:</strong> <span style="color:${liveDelayMins > 0 ? '#ef4444' : '#10b981'}">${escapeHTML(liveDelayStr)}</span></div>
-                            <div><strong>Last Station:</strong> ${escapeHTML(live.lastStation || 'N/A')}</div>
-                            <div><strong>Next Station:</strong> ${escapeHTML(live.nextStation || 'N/A')}</div>
+                        <div class="live-delay-box">
+                            <div><strong>${t('Status')}:</strong> ${escapeHTML(live.positionStatus || t('Unknown'))}</div>
+                            <div><strong>${t('Live Delay')}:</strong> <span style="color:${liveDelayMins > 0 ? '#ef4444' : '#10b981'}">${escapeHTML(liveDelayStr)}</span></div>
+                            <div><strong>${t('Last Station')}:</strong> ${escapeHTML(live.lastStation || 'N/A')}</div>
+                            <div><strong>${t('Next Station')}:</strong> ${escapeHTML(live.nextStation || 'N/A')}</div>
                         </div>
                     `;
                 } else {
-                    resultDiv.innerHTML = '<span style="color: #ef4444;">No live status available for this train.</span>';
+                    resultDiv.innerHTML = `<span class="text-bad">${t('No live status available for this train.')}</span>`;
                 }
             } catch (e) {
-                resultDiv.innerHTML = `<span style="color: #ef4444;">Failed to fetch live delay: ${escapeHTML(e.message)}</span>`;
+                resultDiv.innerHTML = `<span class="text-bad">${t('Failed to fetch live delay')}: ${escapeHTML(e.message)}</span>`;
             }
         });
 
     } catch (err) {
-        content.innerHTML = `<p style="color: #ef4444; text-align: center; padding: 20px;">Failed to load train details: ${escapeHTML(err.message)}</p>`;
+        content.innerHTML = `<p class="error-state">${t('Failed to load train details')}: ${escapeHTML(err.message)}</p>`;
     }
 }
 
@@ -2338,18 +2696,18 @@ window.toggleDelayDateGroup = function(dateKey) {
 function renderRecentDelaysHTML(logs) {
     if (logs === undefined || logs === null) {
         return `
-            <div class="delay-dist-container" style="margin-top: 12px;">
-                <div class="delay-dist-title">📅 Delay Logs (Last 3 Days)</div>
-                <div class="delay-dist-empty">Loading delay logs...</div>
+            <div class="delay-dist-container spaced">
+                <div class="delay-dist-title">📅 ${t('Delay Logs (Last 3 Days)')}</div>
+                <div class="delay-dist-empty">${t('Loading delay logs...')}</div>
             </div>
         `;
     }
 
     if (!Array.isArray(logs) || logs.length === 0) {
         return `
-            <div class="delay-dist-container" style="margin-top: 12px;">
-                <div class="delay-dist-title">📅 Delay Logs (Last 3 Days)</div>
-                <div class="delay-dist-empty">No delay logs recorded in the last 3 days</div>
+            <div class="delay-dist-container spaced">
+                <div class="delay-dist-title">📅 ${t('Delay Logs (Last 3 Days)')}</div>
+                <div class="delay-dist-empty">${t('No delay logs recorded in the last 3 days')}</div>
             </div>
         `;
     }
@@ -2378,7 +2736,7 @@ function renderRecentDelaysHTML(logs) {
 
         const delayMins = primary.delay_minutes || 0;
         const color = delayMins > 0 ? '#ef4444' : '#10b981';
-        const delayText = delayMins > 0 ? `+${delayMins} min late` : 'On Time';
+        const delayText = delayMins > 0 ? t('+{m} min late', { m: delayMins }) : t('On Time');
         let primaryTime = primary.updated_at ? String(primary.updated_at).trim() : '';
         if (primaryTime.includes('T')) primaryTime = primaryTime.split('T')[1];
         if (primaryTime.includes(' ')) primaryTime = primaryTime.split(' ')[1];
@@ -2393,8 +2751,8 @@ function renderRecentDelaysHTML(logs) {
         ` : `${escapeHTML(cleanDate)}${timePart}`;
 
         rowsHTML += `
-            <tr style="border-bottom: 1px solid #2a313d;">
-                <td style="padding: 6px 4px; color: #8b949e;">${dateCellHTML}</td>
+            <tr>
+                <td class="text-dim">${dateCellHTML}</td>
                 <td style="padding: 6px 4px; color: ${color}; font-weight: bold;">${escapeHTML(delayText)}</td>
                 <td style="padding: 6px 4px; color: #d2a8ff; font-size: 11px;">${escapeHTML(primary.last_station || primary.position_status || 'In Transit')}</td>
             </tr>
@@ -2424,18 +2782,18 @@ function renderRecentDelaysHTML(logs) {
     });
 
     return `
-        <div class="delay-dist-container" style="margin-top: 12px;">
+        <div class="delay-dist-container spaced">
             <div class="delay-dist-title">
-                <span>📅 Delay Logs (Last 3 Days)</span>
-                <span style="font-size: 10px; color: #8b949e;">(${dateOrder.length} days recorded)</span>
+                <span>📅 ${t('Delay Logs (Last 3 Days)')}</span>
+                <span class="dist-meta">(${t('{n} days recorded', { n: dateOrder.length })})</span>
             </div>
-            <div class="delay-logs-scroll" style="max-height: 180px; overflow-y: auto; margin-top: 8px;">
-                <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+            <div class="delay-logs-scroll">
+                <table class="data-table small">
                     <thead>
-                        <tr style="border-bottom: 1px solid #3a4250; text-align: left; color: #8b949e;">
-                            <th style="padding: 4px;">Date / Time</th>
-                            <th style="padding: 4px;">Delay</th>
-                            <th style="padding: 4px;">Location</th>
+                        <tr>
+                            <th>${t('Date / Time')}</th>
+                            <th>${t('Delay')}</th>
+                            <th>${t('Location')}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -2451,18 +2809,18 @@ function renderDelayDistributionHTML(dist) {
     if (!dist || !dist.total_records || dist.total_records === 0) {
         return `
             <div class="delay-dist-container">
-                <div class="delay-dist-title">📊 Historical Punctuality Breakdown</div>
-                <div class="delay-dist-empty">No historical delay data available yet</div>
+                <div class="delay-dist-title">📊 ${t('Historical Punctuality Breakdown')}</div>
+                <div class="delay-dist-empty">${t('No historical delay data available yet')}</div>
             </div>
         `;
     }
 
     const items = [
-        { label: 'On time (0 min delay)', pct: dist.ontime_percent || 0, color: '#10b981' },
-        { label: '1–5 min late', pct: dist.late_1_to_5_percent || 0, color: '#38bdf8' },
-        { label: '5–10 min late', pct: dist.late_5_to_10_percent || 0, color: '#f59e0b' },
-        { label: '10–30 min late', pct: dist.late_10_to_30_percent || 0, color: '#f97316' },
-        { label: '>30 min late', pct: dist.late_over_30_percent || 0, color: '#ef4444' }
+        { label: t('On time (0 min delay)'), pct: dist.ontime_percent || 0, color: '#10b981' },
+        { label: t('1–5 min late'), pct: dist.late_1_to_5_percent || 0, color: '#38bdf8' },
+        { label: t('5–10 min late'), pct: dist.late_5_to_10_percent || 0, color: '#f59e0b' },
+        { label: t('10–30 min late'), pct: dist.late_10_to_30_percent || 0, color: '#f97316' },
+        { label: t('>30 min late'), pct: dist.late_over_30_percent || 0, color: '#ef4444' }
     ];
 
     let itemsHTML = '';
@@ -2484,8 +2842,8 @@ function renderDelayDistributionHTML(dist) {
     return `
         <div class="delay-dist-container">
             <div class="delay-dist-title">
-                <span>📊 Historical Punctuality Breakdown</span>
-                <span style="font-size: 10px; color: #8b949e;">(${dist.total_records} logs)</span>
+                <span>📊 ${t('Historical Punctuality Breakdown')}</span>
+                <span class="dist-meta">(${t('{n} logs', { n: dist.total_records })})</span>
             </div>
             ${itemsHTML}
         </div>
@@ -2514,22 +2872,22 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
 
         let activeDisruptionsHTML = '';
         if (train.is_bus_replacement) {
-            activeDisruptionsHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(train.notice_id || '')}" style="margin-left: 6px;">🚌 Bus replacement</span>`;
+            activeDisruptionsHTML += `<span class="notice-badge notice-badge-bus clickable-notice-badge" data-notice-id="${escapeHTML(train.notice_id || '')}" style="margin-left: 6px;">🚌 ${t('Bus replacement')}</span>`;
         }
         if (train.is_track_works) {
-            activeDisruptionsHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(train.notice_id || '')}" style="margin-left: 6px;">🚧 Track works</span>`;
+            activeDisruptionsHTML += `<span class="notice-badge notice-badge-works clickable-notice-badge" data-notice-id="${escapeHTML(train.notice_id || '')}" style="margin-left: 6px;">🚧 ${t('Track works')}</span>`;
         }
 
     const delayBadge = train.delay_minutes > 0
-        ? `<span class="badge badge-delay">+${train.delay_minutes} min delay</span>`
-        : `<span class="badge badge-on-time">Active on Route</span>`;
+        ? `<span class="badge badge-delay">${t('+{m} min delay', { m: train.delay_minutes })}</span>`
+        : `<span class="badge badge-on-time">${t('Active on Route')}</span>`;
 
-    if (titleEl) titleEl.textContent = `🚆 Train ${train.train_number}`;
+    if (titleEl) titleEl.textContent = `🚆 ${t('Train')} ${train.train_number}`;
     showLocateTrainButton();
         if (badgeEl) badgeEl.innerHTML = delayBadge + activeDisruptionsHTML;
 
-    const originStation = escapeHTML(train.first_station_name || 'Origin Station');
-    const destStation = escapeHTML(train.last_station_name || 'Destination Station');
+    const originStation = escapeHTML(train.first_station_name || t('Origin Station'));
+    const destStation = escapeHTML(train.last_station_name || t('Destination Station'));
     const firstTimeStr = train.first_departure_time ? ` (${stripSeconds(train.first_departure_time)})` : '';
     const lastTimeStr = train.last_arrival_time ? ` (${stripSeconds(train.last_arrival_time)})` : '';
 
@@ -2545,27 +2903,27 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
 
     content.innerHTML = `
         <div class="detail-row">
-            <div class="detail-label">First Station (Origin)</div>
+            <div class="detail-label">${t('First Station (Origin)')}</div>
             <div class="detail-value">🚩 ${originStation}${firstTimeStr}</div>
         </div>
         <div class="detail-row">
-            <div class="detail-label">Last Station (Destination)</div>
+            <div class="detail-label">${t('Last Station (Destination)')}</div>
             <div class="detail-value">🏁 ${destStation}${lastTimeStr}</div>
         </div>
         <div class="detail-row">
-            <div class="detail-label">Current Segment</div>
+            <div class="detail-label">${t('Current Segment')}</div>
             <div class="detail-value">${escapeHTML(train.prev_station_name)} ➔ ${escapeHTML(train.next_station_name)}</div>
         </div>
         <div class="detail-row">
-            <div class="detail-label">Progress</div>
+            <div class="detail-label">${t('Progress')}</div>
             <div class="detail-value">${Math.round(train.progress * 100)}%</div>
         </div>
         <div class="detail-row">
-            <div class="detail-label">Delay Status</div>
-            <div class="detail-value">${train.delay_minutes > 0 ? `<span style="color:#ef4444; font-weight:bold;">Running with +${train.delay_minutes} min delay (position auto-adjusted on map)</span>` : '<span style="color:#10b981; font-weight:bold;">On Time</span>'}</div>
+            <div class="detail-label">${t('Delay Status')}</div>
+            <div class="detail-value">${train.delay_minutes > 0 ? `<span class="text-bad text-strong">${t('Running with +{m} min delay (position auto-adjusted on map)', { m: train.delay_minutes })}</span>` : `<span class="text-ok text-strong">${t('On Time')}</span>`}</div>
         </div>
-        <button class="refresh-delay-btn" id="check-delay-btn">📡 Refresh Live Delay Status</button>
-        <div id="live-delay-result" style="margin-top: 10px; font-size: 13px;">${liveResultHTML}</div>
+        <button class="refresh-delay-btn" id="check-delay-btn">📡 ${t('Refresh Live Delay Status')}</button>
+        <div id="live-delay-result" class="live-delay-result">${liveResultHTML}</div>
         <div id="delay-distribution-section">${renderDelayDistributionHTML(train.delay_distribution)}</div>
         <div id="recent-delays-section">${renderRecentDelaysHTML(train.recent_delays)}</div>
     `;
@@ -2607,23 +2965,23 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
 
     document.getElementById('check-delay-btn').addEventListener('click', async () => {
         const resultDiv = document.getElementById('live-delay-result');
-        resultDiv.innerHTML = '<em>Fetching live status from hzpp.app...</em>';
+        resultDiv.innerHTML = `<em>${t('Fetching live status from hzpp.app...')}</em>`;
         try {
             const resp = await fetch(`/api/train-delay?trainId=${encodeURIComponent(trNum)}`);
             const data = await resp.json();
             if (data.success && data.data) {
                 const live = data.data;
                 const liveDelayMins = live.delayMinutes || 0;
-                const liveDelayStr = liveDelayMins > 0 ? `+${liveDelayMins} min` : 'On Time / No Delay';
+                const liveDelayStr = liveDelayMins > 0 ? `+${liveDelayMins} min` : t('On Time / No Delay');
 
                 train.delay_minutes = liveDelayMins;
 
                 resultDiv.innerHTML = `
-                    <div style="background: #1e242e; padding: 10px; border-radius: 6px; border: 1px solid #3a4250;">
-                        <div><strong>Status:</strong> ${escapeHTML(live.positionStatus || 'Unknown')}</div>
-                        <div><strong>Live Delay:</strong> <span style="color:${liveDelayMins > 0 ? '#ef4444' : '#10b981'}">${escapeHTML(liveDelayStr)}</span></div>
-                        <div><strong>Last Station:</strong> ${escapeHTML(live.lastStation || 'N/A')}</div>
-                        <div><strong>Next Station:</strong> ${escapeHTML(live.nextStation || 'N/A')}</div>
+                    <div class="live-delay-box">
+                        <div><strong>${t('Status')}:</strong> ${escapeHTML(live.positionStatus || t('Unknown'))}</div>
+                        <div><strong>${t('Live Delay')}:</strong> <span style="color:${liveDelayMins > 0 ? '#ef4444' : '#10b981'}">${escapeHTML(liveDelayStr)}</span></div>
+                        <div><strong>${t('Last Station')}:</strong> ${escapeHTML(live.lastStation || 'N/A')}</div>
+                        <div><strong>${t('Next Station')}:</strong> ${escapeHTML(live.nextStation || 'N/A')}</div>
                     </div>
                 `;
 
@@ -2631,19 +2989,19 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
                 if (badgeEl) {
                     if (liveDelayMins > 0) {
                         badgeEl.className = 'badge badge-delay';
-                        badgeEl.textContent = `+${liveDelayMins} min delay`;
+                        badgeEl.textContent = t('+{m} min delay', { m: liveDelayMins });
                     } else {
                         badgeEl.className = 'badge badge-on-time';
-                        badgeEl.textContent = 'Active on Route';
+                        badgeEl.textContent = t('Active on Route');
                     }
                 }
 
                 fetchActiveTrains();
             } else {
-                resultDiv.innerHTML = '<span style="color: #ef4444;">No live status available for this train.</span>';
+                resultDiv.innerHTML = `<span class="text-bad">${t('No live status available for this train.')}</span>`;
             }
         } catch (e) {
-            resultDiv.innerHTML = `<span style="color: #ef4444;">Failed to fetch live delay: ${escapeHTML(e.message)}</span>`;
+            resultDiv.innerHTML = `<span class="text-bad">${t('Failed to fetch live delay')}: ${escapeHTML(e.message)}</span>`;
         }
     });
 }

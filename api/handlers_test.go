@@ -323,6 +323,43 @@ func TestGetActiveTrains(t *testing.T) {
 	}
 }
 
+func TestGetActiveTrainsPastMidnight(t *testing.T) {
+	srv := setupTestDB(t)
+
+	// GTFS keeps an overnight train on the previous day's service with times past 24:00.
+	_, err := srv.db.Exec(`
+		INSERT INTO trips (trip_id, route_id, service_id, trip_short_name)
+		VALUES ('t821', 'r1', 'serv1', '821');
+		INSERT INTO stop_times (trip_id, arrival_time, departure_time, arrival_seconds, departure_seconds, stop_id, stop_sequence)
+		VALUES ('t821', '23:30:00', '23:30:00', 84600, 84600, 's1', 1),
+		       ('t821', '25:00:00', '25:00:00', 90000, 90000, 's2', 2);
+	`)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	trains, err := srv.ComputeActiveTrains(1800) // 00:30
+	if err != nil {
+		t.Fatalf("ComputeActiveTrains: %v", err)
+	}
+	var found *ActiveTrain
+	for i := range trains {
+		if trains[i].TrainNumber == "821" {
+			found = &trains[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("overnight train 821 not active at 00:30: %+v", trains)
+	}
+	// Schedule times are shifted into today's clock so the client can interpolate.
+	if found.ScheduledDepSec != -1800 || found.ScheduledArrSec != 3600 {
+		t.Errorf("scheduled secs = %d..%d, want -1800..3600", found.ScheduledDepSec, found.ScheduledArrSec)
+	}
+	if found.Progress < 0.6 || found.Progress > 0.7 {
+		t.Errorf("progress = %f, want ~0.67", found.Progress)
+	}
+}
+
 func TestPlanRoute(t *testing.T) {
 	srv := setupTestDB(t)
 

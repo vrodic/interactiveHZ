@@ -3,13 +3,16 @@ package main
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 
 	_ "time/tzdata"
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -27,6 +30,36 @@ import (
 
 //go:embed web/static/*
 var staticEmbedFS embed.FS
+
+// staticHandler serves the embedded files with a content-hash ETag. Embedded files have
+// no modification time, so without it browsers could keep a stale app.js after an update.
+func staticHandler(fsys fs.FS) http.Handler {
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+
+	etags := map[string]string{}
+	_ = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(fsys, path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		etags["/"+path] = `"` + hex.EncodeToString(sum[:8]) + `"`
+		return nil
+	})
+	etags["/"] = etags["/index.html"]
+
+	files := http.FileServer(http.FS(fsys))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if etag, ok := etags[r.URL.Path]; ok {
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		files.ServeHTTP(w, r)
+	})
+}
 
 type gzipResponseWriter struct {
 	io.Writer
@@ -144,7 +177,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create static sub filesystem: %v", err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(staticSubFS)))
+	mux.Handle("/", staticHandler(staticSubFS))
 
 	port := os.Getenv("PORT")
 	if port == "" {

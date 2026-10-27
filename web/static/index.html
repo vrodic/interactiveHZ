@@ -4,6 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>HŽ Interactive Train Map</title>
+    <meta name="theme-color" content="#0f1217">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png">
+    <link rel="apple-touch-icon" href="/icon-180.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <link rel="stylesheet" href="/style.css">
@@ -14,7 +21,7 @@
             <div class="logo-section">
                 <button id="mobile-menu-btn" class="mobile-menu-btn" title="Toggle Menu">☰</button>
                 <span class="logo-badge">HŽ PP</span>
-                <span class="title">Interactive Train Map</span>
+                <span class="title" data-i18n>Interactive Train Map</span>
             </div>
             <div class="search-section">
                 <input type="text" id="search-input" class="search-input" placeholder="Search station or train...">
@@ -26,43 +33,47 @@
         <div id="left-sidebar">
             <button id="nav-routes" class="sidebar-btn" title="Trip Planner">
                 <span class="sidebar-icon">🗺️</span>
-                <span class="sidebar-label">Trip Planner</span>
+                <span class="sidebar-label" data-i18n>Trip Planner</span>
             </button>
             <button id="nav-notices" class="sidebar-btn" title="Notices & Works">
                 <span class="sidebar-icon">⚠️</span>
-                <span class="sidebar-label">Notices & Works</span>
+                <span class="sidebar-label" data-i18n>Notices & Works</span>
             </button>
             <button id="nav-active-trains" class="sidebar-btn" title="Active Trains">
                 <span class="sidebar-icon">🚆</span>
-                <span class="sidebar-label">Active Trains</span>
+                <span class="sidebar-label" data-i18n>Active Trains</span>
             </button>
             <button id="nav-dashboard" class="sidebar-btn" title="Dashboard">
                 <span class="sidebar-icon">📊</span>
-                <span class="sidebar-label">Dashboard</span>
+                <span class="sidebar-label" data-i18n>Dashboard</span>
             </button>
             <button id="nav-delays-stream" class="sidebar-btn" title="Live Delay Stream">
                 <span class="sidebar-icon">⚡</span>
-                <span class="sidebar-label">Live Delays</span>
+                <span class="sidebar-label" data-i18n>Live Delays</span>
             </button>
             <button id="toggle-time-controls-btn" class="sidebar-btn" title="Toggle Time Controls">
                 <span class="sidebar-icon">⏱️</span>
-                <span class="sidebar-label">Time Controls</span>
+                <span class="sidebar-label" data-i18n>Time Controls</span>
             </button>
             <button id="enable-notifs-btn" class="sidebar-btn" title="Enable Desktop Notifications">
                 <span class="sidebar-icon">🔔</span>
-                <span class="sidebar-label" id="enable-notifs-label">Enable Notifs</span>
+                <span class="sidebar-label" data-i18n id="enable-notifs-label">Enable Notifs</span>
             </button>
             <button id="toggle-speeds-btn" class="sidebar-btn" title="Toggle Speed Markers">
                 <span class="sidebar-icon">⚡</span>
-                <span class="sidebar-label" id="toggle-speeds-label">Hide Speeds</span>
+                <span class="sidebar-label" data-i18n id="toggle-speeds-label">Hide Speeds</span>
+            </button>
+            <button id="toggle-lang-btn" class="sidebar-btn" title="Hrvatski / English">
+                <span class="sidebar-icon">🌐</span>
+                <span class="sidebar-label" id="toggle-lang-label">Hrvatski</span>
             </button>
         </div>
 
         <div id="map"></div>
 
         <div id="time-controls" style="display: none;">
-            <button id="realtime-btn" class="time-btn active">🔴 Realtime</button>
-            <button id="play-btn" class="time-btn">▶ Play</button>
+            <button id="realtime-btn" class="time-btn active">🔴 <span data-i18n>Realtime</span></button>
+            <button id="play-btn" class="time-btn" data-i18n>▶ Play</button>
             <select id="speed-select" class="speed-select" title="Playback Speed">
                 <option value="1">1x</option>
                 <option value="5">5x</option>
@@ -75,8 +86,8 @@
 
         <div id="side-panel">
             <div class="panel-header">
-                <div id="side-panel-title-container" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                    <span class="panel-title" id="side-panel-title">Details</span>
+                <div id="side-panel-title-container" class="panel-title-row">
+                    <span class="panel-title" id="side-panel-title" data-i18n>Details</span>
                     <button id="locate-train-btn" class="locate-train-btn" title="Show train on map" aria-label="Show train on map" style="display: none;">📍</button>
                     <span id="side-panel-badge"></span>
                 </div>
@@ -87,9 +98,9 @@
 
         <!-- Notices & Works Modal -->
         <div id="notices-modal" class="modal-overlay" style="display: none;">
-            <div class="modal-content" style="max-width: 800px;">
+            <div class="modal-content">
                 <div class="modal-header">
-                    <span class="panel-title">⚠️ Traffic Notices & Track Works (Stanje u prometu)</span>
+                    <span class="panel-title">⚠️ <span data-i18n>Traffic Notices & Track Works (Stanje u prometu)</span></span>
                     <button class="close-btn" id="close-notices-modal">&times;</button>
                 </div>
                 <div class="modal-body" id="notices-modal-body">
@@ -102,7 +113,7 @@
         <div id="active-trains-modal" class="modal-overlay" style="display: none;">
             <div class="modal-content">
                 <div class="modal-header">
-                    <span class="panel-title">🚆 Currently Active Trains</span>
+                    <span class="panel-title">🚆 <span data-i18n>Currently Active Trains</span></span>
                     <button class="close-btn" id="close-active-trains-modal">&times;</button>
                 </div>
                 <div class="modal-body" id="active-trains-modal-body">
@@ -115,23 +126,23 @@
         <div id="delays-stream-modal" class="modal-overlay" style="display: none;">
             <div class="modal-content">
                 <div class="modal-header">
-                    <span class="panel-title">⚡ Real-Time Delay Process Feed</span>
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <span id="stream-status-badge" style="font-size: 11px; background: #10b981; color: #fff; padding: 2px 8px; border-radius: 10px; font-weight: bold;">LIVE SSE</span>
+                    <span class="panel-title">⚡ <span data-i18n>Real-Time Delay Process Feed</span></span>
+                    <div class="modal-header-actions">
+                        <span id="stream-status-badge" class="stream-status-badge">LIVE SSE</span>
                         <button class="close-btn" id="close-delays-stream-modal">&times;</button>
                     </div>
                 </div>
                 <div class="modal-body">
-                    <div id="delay-service-stats-panel" style="background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; display: flex; gap: 16px; flex-wrap: wrap; justify-content: space-between; font-size: 12px;">
-                        <div><strong>Total API Calls:</strong> <span id="ds-total-calls" style="color: #00e5ff;">0</span></div>
-                        <div><strong>Calls/Min:</strong> <span id="ds-calls-min" style="color: #3fb950;">0</span></div>
-                        <div><strong>Calls/Hour:</strong> <span id="ds-calls-hour" style="color: #d2a8ff;">0</span></div>
-                        <div><strong>Success/Fail:</strong> <span id="ds-success-fail" style="color: #e6edf3;">0/0</span></div>
-                        <div><strong>Last Call:</strong> <span id="ds-last-time" style="color: #8b949e;">Never</span></div>
+                    <div id="delay-service-stats-panel" class="delay-stats-panel">
+                        <div><strong data-i18n>Total API Calls:</strong> <span id="ds-total-calls" class="stat-cyan">0</span></div>
+                        <div><strong data-i18n>Calls/Min:</strong> <span id="ds-calls-min" class="stat-green">0</span></div>
+                        <div><strong data-i18n>Calls/Hour:</strong> <span id="ds-calls-hour" class="stat-purple">0</span></div>
+                        <div><strong data-i18n>Success/Fail:</strong> <span id="ds-success-fail" class="stat-plain">0/0</span></div>
+                        <div><strong data-i18n>Last Call:</strong> <span id="ds-last-time" class="stat-muted">Never</span></div>
                     </div>
-                    <p style="font-size: 13px; color: #a0aec0; margin-bottom: 12px;">Live feed streaming train delay updates, background polling activity, and status changes in real time.</p>
-                    <div id="delays-stream-log" style="background: #0d1117; border: 1px solid #2a313d; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
-                        <div style="color: #6e7681;">[System] Connecting to real-time delay event stream...</div>
+                    <p class="modal-intro" data-i18n>Live feed streaming train delay updates, background polling activity, and status changes in real time.</p>
+                    <div id="delays-stream-log" class="delays-stream-log">
+                        <div class="stream-log-system" data-i18n>[System] Connecting to real-time delay event stream...</div>
                     </div>
                 </div>
             </div>
@@ -141,7 +152,7 @@
         <div id="dashboard-modal" class="modal-overlay" style="display: none;">
             <div class="modal-content">
                 <div class="modal-header">
-                    <span class="panel-title">📊 Live Dashboard & Statistics</span>
+                    <span class="panel-title">📊 <span data-i18n>Live Dashboard & Statistics</span></span>
                     <button class="close-btn" id="close-dashboard-modal">&times;</button>
                 </div>
                 <div class="modal-body" id="dashboard-modal-body">
@@ -153,46 +164,47 @@
         <!-- Trip Planner / Routes Bottom Drawer Segment -->
         <div id="trip-planner-drawer" class="bottom-drawer" style="display: none;">
             <div class="drawer-header">
-                <span class="panel-title">🗺️ Train Trip Planner</span>
+                <span class="panel-title">🗺️ <span data-i18n>Train Trip Planner</span></span>
                 <button class="close-btn" id="close-trip-planner-drawer">&times;</button>
             </div>
             <div class="drawer-body">
-                <div style="display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; align-items: center;">
-                    <div style="flex: 1; min-width: 180px; position: relative;">
-                        <label style="font-size: 11px; color: #a0aec0; display: block; margin-bottom: 4px;">FROM (ORIGIN STATION)</label>
-                        <div style="display: flex; gap: 6px;">
-                            <input type="text" id="route-from-input" class="search-input" placeholder="Type origin station..." autocomplete="off" style="flex: 1; min-width: 0; padding: 8px; background: #1e242e; color: #fff; border: 1px solid #3a4250; border-radius: 6px;">
+                <div class="planner-form">
+                    <div class="planner-field">
+                        <label class="planner-label" data-i18n for="route-from-input">FROM (ORIGIN STATION)</label>
+                        <div class="planner-input-row">
+                            <input type="text" id="route-from-input" class="planner-input" placeholder="Type origin station..." autocomplete="off">
                             <button id="route-from-locate-btn" class="route-locate-btn" title="Use my location (nearest station)" aria-label="Use my location">📍</button>
                         </div>
                         <input type="hidden" id="route-from-id">
-                        <div id="route-from-results" class="search-results" style="position: absolute; width: 100%; z-index: 1000;"></div>
+                        <div id="route-from-results" class="search-results planner-results"></div>
                     </div>
-                    <div style="align-self: flex-end; margin-bottom: 2px;">
-                        <button id="swap-stations-btn" style="padding: 8px 12px; background: #2a313d; border: 1px solid #3a4250; border-radius: 6px; color: #00e5ff; font-weight: bold; cursor: pointer; font-size: 14px;" title="Switch Stations">🔁</button>
+                    <div class="planner-swap">
+                        <button id="swap-stations-btn" class="swap-stations-btn" title="Switch Stations">🔁</button>
                     </div>
-                    <div style="flex: 1; min-width: 180px; position: relative;">
-                        <label style="font-size: 11px; color: #a0aec0; display: block; margin-bottom: 4px;">TO (DESTINATION STATION)</label>
-                        <input type="text" id="route-to-input" class="search-input" placeholder="Type destination station..." autocomplete="off" style="width: 100%; padding: 8px; background: #1e242e; color: #fff; border: 1px solid #3a4250; border-radius: 6px;">
+                    <div class="planner-field">
+                        <label class="planner-label" data-i18n for="route-to-input">TO (DESTINATION STATION)</label>
+                        <input type="text" id="route-to-input" class="planner-input" placeholder="Type destination station..." autocomplete="off">
                         <input type="hidden" id="route-to-id">
-                        <div id="route-to-results" class="search-results" style="position: absolute; width: 100%; z-index: 1000;"></div>
+                        <div id="route-to-results" class="search-results planner-results"></div>
                     </div>
-                    <div style="align-self: flex-end;">
-                        <button id="find-routes-btn" style="padding: 9px 18px; background: #0066cc; border: none; border-radius: 6px; color: #fff; font-weight: bold; cursor: pointer;">🔍 Find Trains</button>
+                    <div class="planner-submit">
+                        <button id="find-routes-btn" class="find-routes-btn">🔍 <span data-i18n>Find Trains</span></button>
                     </div>
                 </div>
                 <!-- Recently Used Station Pairs -->
-                <div id="recent-pairs-container" style="margin-bottom: 16px; display: none;">
-                    <span style="font-size: 11px; color: #a0aec0; margin-right: 8px;">Recent searches:</span>
-                    <div id="recent-pairs-chips" style="display: inline-flex; gap: 6px; flex-wrap: wrap;"></div>
+                <div id="recent-pairs-container" class="recent-pairs" style="display: none;">
+                    <span class="recent-pairs-label" data-i18n>Recent searches:</span>
+                    <div id="recent-pairs-chips" class="recent-pairs-chips"></div>
                 </div>
                 <div id="route-results-container">
-                    <p style="text-align: center; color: #a0aec0; padding: 20px;">Select origin and destination stations above to view all scheduled trains for the day.</p>
+                    <p class="empty-state" data-i18n>Select origin and destination stations above to view all scheduled trains for the day.</p>
                 </div>
             </div>
         </div>
     </div>
 
     <div id="toast-container"></div>
+    <script src="/i18n.js"></script>
     <script src="/app.js"></script>
 </body>
 </html>

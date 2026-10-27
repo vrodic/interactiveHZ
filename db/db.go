@@ -163,6 +163,12 @@ func InitDB(dbPath string) (*sql.DB, error) {
 
 	_, _ = database.Exec("DROP INDEX IF EXISTS idx_stop_times_trip_id;")
 
+	if n, err := DedupeHistoricalDelays(database); err != nil {
+		log.Printf("Historical delay dedupe failed: %v", err)
+	} else if n > 0 {
+		log.Printf("Removed %d duplicate historical delay rows", n)
+	}
+
 	var segCount int
 	_ = database.QueryRow("SELECT COUNT(*) FROM route_segments").Scan(&segCount)
 	if segCount == 0 {
@@ -192,4 +198,20 @@ func PopulateRouteSegments(database *sql.DB) error {
 	`
 	_, err := database.Exec(query)
 	return err
+}
+
+// DedupeHistoricalDelays deletes rows of historical_train_delays that are exact copies
+// (every column but id) of an earlier row. All distinct readings are kept.
+func DedupeHistoricalDelays(database *sql.DB) (int64, error) {
+	res, err := database.Exec(`
+		DELETE FROM historical_train_delays
+		WHERE id NOT IN (
+			SELECT MIN(id) FROM historical_train_delays
+			GROUP BY train_number, delay_date, delay_minutes, position_status, last_station, next_station, updated_at
+		)
+	`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
