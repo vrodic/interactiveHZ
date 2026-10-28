@@ -1305,46 +1305,25 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 		details.LastStationName = details.Headsign
 	}
 
+	// Same 6h freshness cutoff as ComputeActiveTrains, so a stale delay from an earlier
+	// run doesn't shift this train's schedule differently than on the map.
 	var delayMins int
 	var posStatus string
-	_ = s.db.QueryRow("SELECT delay_minutes, COALESCE(position_status, '') FROM train_delays WHERE train_number = ?", trainNum).Scan(&delayMins, &posStatus)
+	cutoffStr := zgNow.Add(-6 * time.Hour).Format("2006-01-02 15:04:05")
+	_ = s.db.QueryRow("SELECT delay_minutes, COALESCE(position_status, '') FROM train_delays WHERE train_number = ? AND updated_at >= ?", trainNum, cutoffStr).Scan(&delayMins, &posStatus)
 	details.DelayMinutes = delayMins
 	details.PositionStatus = posStatus
 
-	// Targeted calculation for single train active status & coordinates using details.TripID directly
-	effectiveTime := nowSec - (delayMins * 60)
-	activeQuery := `
-		SELECT st1.stop_id, st1.departure_seconds,
-		       st2.stop_id, st2.arrival_seconds
-		FROM stop_times st1
-		JOIN stop_times st2 ON st1.trip_id = st2.trip_id AND st2.stop_sequence = st1.stop_sequence + 1
-		WHERE st1.trip_id = ?
-		  AND st1.departure_seconds <= ? AND st2.arrival_seconds >= ?
-		LIMIT 1
-	`
-
-	var (
-		s1ID, s2ID       string
-		s1DepSec, s2ArrSec int
-	)
-	if err := s.db.QueryRow(activeQuery, details.TripID, effectiveTime, effectiveTime).Scan(&s1ID, &s1DepSec, &s2ID, &s2ArrSec); err == nil {
-		s1, ok1 := s.getStation(s1ID)
-		s2, ok2 := s.getStation(s2ID)
-		if ok1 && ok2 {
-			details.IsActive = true
-			duration := float64(s2ArrSec - s1DepSec)
-			progress := 0.0
-			if duration > 0 {
-				progress = float64(effectiveTime-s1DepSec) / duration
-				if progress < 0 {
-					progress = 0
-				}
-				if progress > 1 {
-					progress = 1
-				}
+	// Active status and position come from the same computation as the map's train
+	// markers (calendar, delays, trains past midnight), so the details panel never calls
+	// a train running that the map doesn't show, or the other way round.
+	if activeTrains, err := s.ComputeActiveTrains(nowSec); err == nil {
+		for _, tr := range activeTrains {
+			if tr.TrainNumber == trainNum || tr.TripID == trainNum {
+				details.IsActive = true
+				details.Lat, details.Lon = tr.CurrentLat, tr.CurrentLon
+				break
 			}
-			pathWaypoints := s.getRouteWaypoints(s1ID, s2ID, s1.Lat, s1.Lon, s2.Lat, s2.Lon)
-			details.Lat, details.Lon = interpolateAlongPath(pathWaypoints, progress)
 		}
 	}
 

@@ -2470,10 +2470,27 @@ function showLocateTrainButton() {
     if (btn) btn.style.display = 'inline-flex';
 }
 
-function locateTrainOnMap(trNum) {
+function findActiveTrainMarker(trNum) {
+    // Transfer routes from the planner are labelled "2201 ➔ 2305": match either leg.
+    const nums = String(trNum).split('➔').map(s => s.trim()).filter(Boolean);
+    for (const n of nums) {
+        const train = activeTrainsData.find(t => t.train_number === n || t.trip_id === n);
+        const marker = train && trainMarkersMap[train.trip_id];
+        if (marker) return marker;
+    }
+    return null;
+}
+
+async function locateTrainOnMap(trNum) {
     if (!trNum) return;
-    const train = activeTrainsData.find(t => t.train_number === trNum || t.trip_id === trNum);
-    const marker = train && trainMarkersMap[train.trip_id];
+    let marker = findActiveTrainMarker(trNum);
+    if (!marker) {
+        // The active train list is refreshed only every few seconds, so the train may
+        // have started running since: refresh it once before giving up.
+        await fetchActiveTrains();
+        if (currentOpenedTrainNum !== trNum) return;
+        marker = findActiveTrainMarker(trNum);
+    }
     if (!marker) {
         showToast(`🚆 ${t('Train')} ${trNum}`, t('This train is not running on the map right now.'));
         return;
