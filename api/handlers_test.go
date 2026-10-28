@@ -1008,3 +1008,36 @@ func BenchmarkGetSegments(b *testing.B) {
 		srv.GetSegments(w, req)
 	}
 }
+
+func TestGetTrainStopTime(t *testing.T) {
+	srv := setupTestDB(t)
+
+	req := httptest.NewRequest("GET", "/api/train-stop?train_number=2010&stop_id=s2", nil)
+	w := httptest.NewRecorder()
+	srv.GetTrainStopTime(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status OK, got %d", w.Code)
+	}
+	var st TrainStopTime
+	if err := json.NewDecoder(w.Body).Decode(&st); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if st.StopName != "Vinkovci" || st.ArrivalTime != "12:00:00" || st.ArrivalSeconds != 43200 || st.IsFirstStop {
+		t.Errorf("Unexpected stop time: %+v", st)
+	}
+
+	req = httptest.NewRequest("GET", "/api/train-stop?train_number=2010&stop_id=s1", nil)
+	w = httptest.NewRecorder()
+	srv.GetTrainStopTime(w, req)
+	if err := json.NewDecoder(w.Body).Decode(&st); err != nil || !st.IsFirstStop || st.DepartureTime != "10:05:00" {
+		t.Errorf("Expected first stop departing 10:05:00, got %+v (err %v)", st, err)
+	}
+
+	req = httptest.NewRequest("GET", "/api/train-stop?train_number=2010&stop_id=nope", nil)
+	w = httptest.NewRecorder()
+	srv.GetTrainStopTime(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 for a station the train doesn't stop at, got %d", w.Code)
+	}
+}

@@ -2616,6 +2616,7 @@ async function fetchAndDisplayTrainDetails(trainNum) {
                 <div class="detail-label">${t('Last Station (Destination)')}</div>
                 <div class="detail-value">🏁 ${escapeHTML(data.last_station_name)}${lastTimeStr}</div>
             </div>
+            ${renderFromStationRowHTML(trainNum, data.delay_minutes)}
             <div class="detail-row">
                 <div class="detail-label">${t('Scheduled Journey Time')}</div>
                 <div class="detail-value">🕒 ${stripSeconds(data.first_departure_time)} ➔ ${stripSeconds(data.last_arrival_time)}</div>
@@ -2867,6 +2868,67 @@ function renderDelayDistributionHTML(dist) {
     `;
 }
 
+// The trip planner's "From" station, or the origin of the most recent planned trip.
+function getPlannerFromStation() {
+    const idInput = document.getElementById('route-from-id');
+    if (idInput && idInput.value) {
+        const st = stationsData.find(x => x.stop_id === idInput.value);
+        const nameInput = document.getElementById('route-from-input');
+        return { id: idInput.value, name: st ? st.stop_name : (nameInput ? nameInput.value : '') };
+    }
+    try {
+        const latest = JSON.parse(localStorage.getItem('hz_recent_pairs') || '[]')[0];
+        if (latest && latest.fromId) return { id: latest.fromId, name: latest.fromName || '' };
+    } catch (e) { /* storage unavailable */ }
+    return null;
+}
+
+// Schedule at a station per "train|stop_id": the response, or null if the train doesn't stop there.
+const trainStopTimeCache = {};
+
+// A details row with the train's time at the planner's "From" station; empty when there
+// is no such station or the train doesn't stop there. Fetches on first use and fills
+// the row in when the answer arrives.
+function renderFromStationRowHTML(trNum, delayMinutes) {
+    const from = getPlannerFromStation();
+    // A planner transfer ("2201 ➔ 2305") leaves the "From" station on its first train.
+    const firstLeg = String(trNum || '').split('➔')[0].trim();
+    if (!from || !firstLeg) return '<div id="from-station-row"></div>';
+
+    const key = `${firstLeg}|${from.id}`;
+    if (!(key in trainStopTimeCache)) {
+        trainStopTimeCache[key] = undefined;
+        fetch(`/api/train-stop?train_number=${encodeURIComponent(firstLeg)}&stop_id=${encodeURIComponent(from.id)}`)
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                trainStopTimeCache[key] = data;
+                const row = document.getElementById('from-station-row');
+                if (row && currentOpenedTrainNum === trNum) {
+                    row.outerHTML = renderFromStationRowHTML(trNum, delayMinutes);
+                }
+            })
+            .catch(() => { delete trainStopTimeCache[key]; });
+    }
+
+    const stop = trainStopTimeCache[key];
+    if (!stop) return '<div id="from-station-row"></div>';
+
+    const label = stop.is_first_stop
+        ? t('Departure from {station}', { station: stop.stop_name || from.name })
+        : t('Arrival at {station}', { station: stop.stop_name || from.name });
+    const schedTime = stop.is_first_stop ? stop.departure_time : stop.arrival_time;
+    const schedSec = stop.is_first_stop ? stop.departure_seconds : stop.arrival_seconds;
+    const expected = delayMinutes > 0
+        ? ` <span class="text-bad text-strong">${t('(expected {time})', { time: stripSeconds(formatSecondsToTime(schedSec + delayMinutes * 60)) })}</span>`
+        : '';
+
+    return `
+        <div class="detail-row" id="from-station-row">
+            <div class="detail-label">${escapeHTML(label)}</div>
+            <div class="detail-value">🕒 ${escapeHTML(stripSeconds(schedTime))}${expected}</div>
+        </div>`;
+}
+
 function updateTrainDetailsPanel(train, isNewOpen = false) {
     const panel = document.getElementById('side-panel');
     const content = document.getElementById('panel-content');
@@ -2927,6 +2989,7 @@ function updateTrainDetailsPanel(train, isNewOpen = false) {
             <div class="detail-label">${t('Last Station (Destination)')}</div>
             <div class="detail-value">🏁 ${destStation}${lastTimeStr}</div>
         </div>
+        ${renderFromStationRowHTML(trNum, train.delay_minutes)}
         <div class="detail-row">
             <div class="detail-label">${t('Current Segment')}</div>
             <div class="detail-value">${escapeHTML(train.prev_station_name)} ➔ ${escapeHTML(train.next_station_name)}</div>

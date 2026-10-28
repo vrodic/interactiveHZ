@@ -170,6 +170,18 @@ type TrainDetails struct {
 	RecentDelays          []RecentDelayLog   `json:"recent_delays,omitempty"`
 }
 
+// TrainStopTime is when a train is scheduled at one station of its route.
+type TrainStopTime struct {
+	TrainNumber      string `json:"train_number"`
+	StopID           string `json:"stop_id"`
+	StopName         string `json:"stop_name"`
+	ArrivalTime      string `json:"arrival_time"`
+	DepartureTime    string `json:"departure_time"`
+	ArrivalSeconds   int    `json:"arrival_seconds"`
+	DepartureSeconds int    `json:"departure_seconds"`
+	IsFirstStop      bool   `json:"is_first_stop"`
+}
+
 type TrainSegmentSpeed struct {
 	TrainNumber     string  `json:"train_number"`
 	TripID          string  `json:"trip_id"`

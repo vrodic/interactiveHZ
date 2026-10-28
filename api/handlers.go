@@ -1359,6 +1359,42 @@ func (s *Server) GetTrainDetails(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(details)
 }
 
+// GetTrainStopTime returns when a train (train_number) is scheduled at a station
+// (stop_id), preferring the trip that runs today. 404 if the train doesn't stop there.
+func (s *Server) GetTrainStopTime(w http.ResponseWriter, r *http.Request) {
+	trainNum := strings.TrimSpace(r.URL.Query().Get("train_number"))
+	stopID := strings.TrimSpace(r.URL.Query().Get("stop_id"))
+	if trainNum == "" || stopID == "" {
+		http.Error(w, "train_number and stop_id parameters are required", http.StatusBadRequest)
+		return
+	}
+
+	calCond, calArgs := getCalendarCondition(getZagrebTime())
+	query := fmt.Sprintf(`
+		SELECT s.stop_name, st.arrival_time, st.departure_time, st.arrival_seconds, st.departure_seconds,
+		       st.stop_sequence = (SELECT MIN(stop_sequence) FROM stop_times WHERE trip_id = t.trip_id)
+		FROM trips t
+		LEFT JOIN calendar c ON t.service_id = c.service_id
+		JOIN stop_times st ON st.trip_id = t.trip_id
+		JOIN stations s ON s.stop_id = st.stop_id
+		WHERE (t.trip_short_name = ? OR t.trip_id = ?) AND st.stop_id = ?
+		ORDER BY (CASE WHEN %s THEN 0 ELSE 1 END), st.stop_sequence
+		LIMIT 1
+	`, calCond)
+	args := append([]interface{}{trainNum, trainNum, stopID}, calArgs...)
+
+	res := TrainStopTime{TrainNumber: trainNum, StopID: stopID}
+	err := s.db.QueryRow(query, args...).Scan(&res.StopName, &res.ArrivalTime, &res.DepartureTime,
+		&res.ArrivalSeconds, &res.DepartureSeconds, &res.IsFirstStop)
+	if err != nil {
+		http.Error(w, "Train does not stop at this station", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
 func (s *Server) getRecentDelays(trainNum string) []RecentDelayLog {
 	cutoffDate := getZagrebTime().AddDate(0, 0, -3).Format("2006-01-02")
 	rows, err := s.db.Query(`

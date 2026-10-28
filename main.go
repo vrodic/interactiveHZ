@@ -165,6 +165,7 @@ func main() {
 	mux.HandleFunc("/api/stations", server.GetStations)
 	mux.HandleFunc("/api/stations/", server.GetStationTimetable)
 	mux.HandleFunc("/api/trains/", server.GetTrainDetails)
+	mux.HandleFunc("/api/train-stop", server.GetTrainStopTime)
 	mux.HandleFunc("/api/active-trains", server.GetActiveTrains)
 	mux.HandleFunc("/api/segments", server.GetSegments)
 	mux.HandleFunc("/api/segments/details", server.GetSegmentDetails)
