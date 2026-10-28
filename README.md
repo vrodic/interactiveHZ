@@ -83,6 +83,10 @@ sudo apt-get install -y golang gcc sqlite3
 
 - `GET /api/stations` - Returns all train stations with names and coordinates.
 - `GET /api/stations/{id}/timetable` - Returns arrival/departure schedule for a specific station.
+- `GET /api/search?q={query}` - Searches stations and trains by name or number.
+- `GET /api/notices` - Returns current HŽ traffic notices (track works, bus replacements).
+- `GET /api/trains/{number}` - Returns train details: terminals, schedule, delay, active status and position, punctuality history.
+- `GET /api/train-stop?train_number={number}&stop_id={id}` - Returns a train's scheduled arrival/departure at one station.
 - `GET /api/active-trains?time={time}` - Returns real-time or scrubbed active train positions, interpolated between stops.
 - `GET /api/segments` - Returns all track segments and average speeds.
 - `GET /api/segments/details?from={id}&to={id}` - Returns on-demand train details for a track segment.
